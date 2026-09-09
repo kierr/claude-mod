@@ -1,12 +1,24 @@
 # claude-mod
 
-Local modifications for Claude Code, focused on using custom models and third-party API providers.
+Since mid-2025, I have used this project to heavily modify, patch, and extend Claude Code in a number of ways. In late 2026 I have for the most part moved on, to a heavily customized `pi`, but I wanted to still open source this project for others who might have use in it.
 
-claude-mod downloads an official Claude Code package, transforms it on your machine, and runs the result with Bun. The repository distributes the patching tool—not Claude Code or a prepatched binary.
+The projects goal is to smooth out the friction around typical patching, and provide a full TUI UX for enabling, disalbing, and toggling them. I call it "un-nerfing" - Anthropic has historically restricted lots of things to specific models (like opus only) or disabled them when using a 3PP. In other cases, features are gated, entirely hard-coded off, or added and then removed silently.
 
-**Supported release: Claude Code 2.1.181 on macOS.** The fresh-install path has been verified on Apple Silicon. Linux, Intel Mac runtime compatibility, and other Claude Code versions are not certified.
+These mods are focused on re-enabling these things, for 3PP and non-Anthropic models. There are also tweaks and toggles exposed to configure things that are otherwise unconfigurable.
 
-This is an unofficial project, not affiliated with Anthropic. Review the terms applicable to your use of Claude Code.
+It is very easy, using Claude Code, to extend and expand with new mods. This is done using YAML, extending new patches, and exposing the new mod via a Mods TUI panel alongside other TUI configuration.
+
+I am not publishing releases, to avoid a DCMA, so you'll have to do the patch on your own machine or CI pipelines. The neat thing is, once patched, you don't need to keep repatching to enable, disable, or configure the mods - you use the TUI Mods panel.
+
+<screenshot of mods panel>
+
+I have included a skill for creating new Mods. There is also a skill for maintaining version compatibility, as each new version requires some effort.
+
+**Supported release: Claude Code 2.1.181 on macOS.**
+
+I had it working on Linux too, with Claude Code Actions, I'll work on getting that up next, along with the latest version. I had in git history, compatibility back to ~1.3, but I've squashed everything before makin this public.
+
+~
 
 ## What it changes
 
