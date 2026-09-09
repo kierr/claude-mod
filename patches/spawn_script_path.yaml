@@ -1,0 +1,20 @@
+id: "spawn_script_path"
+target: "claude-code"
+name: "Spawn Script Path"
+description: "Include process.argv[1] (the JS script path) in every spawned-worker argv (QF dispatch spawn, u3m spare-pool spawn, the macOS posix_spawn TCC site). The patched CLI runs as `bun <external-js>`, so children spawned without the script path make bun load the rendezvous .sock as a module and exit 1 before init (Agent View 'worker stalled'). Required to keep background workers booting alongside native_binary_compat's EA-forcing; harmless when the native-binary check is false."
+file_id: "cli"
+
+status_tests:
+  applied: '__ssp_patched__'
+  applicable: 'return \[process\.execPath\];'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-spawn-script-path.cjs"
+
+mod:
+  live: false
+  category: "features"
+
+order: 5

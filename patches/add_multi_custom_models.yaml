@@ -1,0 +1,20 @@
+id: "add_multi_custom_models"
+target: "claude-code"
+name: "Multiple Custom Model Options"
+description: "Support multiple custom models via ANTHROPIC_CUSTOM_MODEL_OPTION_N env vars (N=1..20)"
+file_id: "cli"
+status_tests:
+  # applied: mod guard wrapping the for-loop with numbered custom model options
+  applied: '__isModEnabled__\(\s*["\x27]add_multi_custom_models["\x27]\s*\)[\s\S]{0,2000}ANTHROPIC_CUSTOM_MODEL_OPTION_'
+  # applicable: original single custom model option check exists (before patch)
+  applicable: 'process\.env\.ANTHROPIC_CUSTOM_MODEL_OPTION[^_\d]'
+codemod:
+  type: "node_script"
+  engine: "babel"
+  script: "codemods/codemod-add-multi-custom-models.cjs"
+
+
+mod:
+  live: false
+  category: "model"
+order: 16

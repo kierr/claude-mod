@@ -1,0 +1,25 @@
+id: "set_env_info_prompt"
+target: "claude-code"
+name: "Env Model Info"
+description: "Replace hardcoded Claude model claims in env_info with a custom prompt via the Mods panel (blank = claims removed)."
+file_id: "cli"
+order: 16
+
+status_tests:
+  applied: '__getModConfig__\(\s*["\x27]set_env_info_prompt["\x27]'
+  # Accept singular-family and plural-model wording.
+  applicable: 'The most recent Claude model'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-set-env-info-prompt.cjs"
+
+mod:
+  live: true
+  category: "model"
+  config:
+    - key: "prompt"
+      type: "string"
+      default: ""
+      label: "Env info prompt (blank = remove claims)"

@@ -1,0 +1,24 @@
+id: "unlock_daemon"
+target: "claude-code"
+name: "Enable Background Daemon"
+description: "Enable the persistent background daemon (install, start, stop) regardless of GrowthBook flags."
+file_id: "cli"
+
+status_tests:
+  # applied: gate function has mod-guard with marker
+  applied: '__DSE__'
+  # applicable: gate function reads tengu_amber_anchor flag (not yet mod-guarded)
+  applicable: 'function\s+[\w$]+\(\)\s*\{\s*return\s+[\w$]+\(\s*"tengu_amber_anchor"\s*,\s*false\s*\)\s*;\s*\}'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-daemon.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "features"
+  config: []
+
+order: 15

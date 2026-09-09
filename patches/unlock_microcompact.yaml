@@ -1,0 +1,47 @@
+id: "unlock_microcompact"
+target: "claude-code"
+name: "Microcompact Tuning"
+description: "Restore time-based microcompact from upstream (evaluateTimeBasedTrigger + maybeTimeBasedMicrocompact), force-enable context_hint microcompact (tengu_hazel_osprey), and make the tokens-saved threshold configurable. Time-based trigger clears compactable tool results when the gap since the last assistant message exceeds the configurable threshold (default 30 minutes). An adaptive policy resolver (mode: auto|off|idle|gentle|aggressive) resolves {window, cache} DYNAMICALLY from the active model slug (captured at the SDK fetch chokepoint via a profile table), so it switches correctly across glm-5 (1M), glm-4.6 (200K), claude-* (200K), etc.; static context_window/provider_cache are escape-hatch overrides."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__mct_patched__'
+  applicable: 'tengu_hazel_osprey'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-microcompact.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "features"
+  config:
+    - key: "mode"
+      type: "string"
+      default: "auto"
+      label: "Policy: auto|off|idle|gentle|aggressive"
+    - key: "provider_cache"
+      type: "string"
+      default: "auto"
+      label: "Provider cache override: auto|cached|none (auto = from model profile)"
+    - key: "context_window"
+      type: "number"
+      default: 0
+      label: "Context-window override in tokens (0 = use model profile)"
+    - key: "time_threshold_min"
+      type: "number"
+      default: 30
+      label: "Gap threshold (minutes)"
+    - key: "keep_recent"
+      type: "number"
+      default: 5
+      label: "Keep recent tool results"
+    - key: "tokens_saved_threshold"
+      type: "number"
+      default: 20000
+      label: "Tokens-saved threshold"
+
+order: 16

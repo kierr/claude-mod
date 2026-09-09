@@ -1,0 +1,19 @@
+id: "mods_ui"
+target: "claude-code"
+name: "Mods Config Tab"
+description: "Adds a Mods tab to the /config UI for toggling patches at runtime without re-patching."
+file_id: "cli"
+
+status_tests:
+  applied: 'title:\s*"Mods"'
+  applicable: 'title:\s*"Stats"'
+codemod:
+  type: "node_script"
+  engine: "babel"
+  script: "codemods/codemod-inject-mods-ui.cjs"
+
+mod:
+  section: "core"
+  live: true
+  category: "system"
+order: 99

@@ -1,0 +1,19 @@
+id: "add_auth_token_as_api_key"
+target: "claude-code"
+name: "Auth Token as API Key"
+description: "Uses ANTHROPIC_AUTH_TOKEN as the API-key source and suppresses the duplicate-auth warning when both resolvers use that same token. This can send the token as x-api-key as well as Authorization; enable only if your provider accepts that behavior."
+file_id: "cli"
+order: 15
+status_tests:
+  # applied checks __ATAK__ only; the __BAM__ warning-suppression rider is best-effort
+  # so a future rewrite of the both-auth-methods warning can't fail verification and
+  # disable this auth mod along with it. If the rider drifts, the warning returns.
+  applied: '__ATAK__'
+  applicable: 'skipRetrievingKeyFromApiKeyHelper[\s\S]{0,2000}source:\s*"none"[\s\S]{0,2000}process\.env\.ANTHROPIC_API_KEY'
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-add-auth-token-as-api-key.cjs"
+mod:
+  live: true
+  category: "remote"

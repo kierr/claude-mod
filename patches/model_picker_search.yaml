@@ -1,0 +1,24 @@
+id: "model_picker_search"
+target: "claude-code"
+name: "Model Picker Search"
+description: "Adds a /-to-search filter bar to the /model picker (mirrors the Mods panel search UX). Type to filter models by name/description/value; Enter or down exits search and focuses the first match; Esc clears the query."
+file_id: "cli"
+order: 20
+
+status_tests:
+  # Require the wrapper, keymap action and handler together.
+  # A leading literal avoids scanning a marker-free baseline with an unbounded lookahead.
+  applied: '__ModelSearchSelect__[\s\S]*"modelPicker:search"[\s\S]*modelPicker:search'
+  # applicable: the picker's Select call signature (structural, \w+ for the
+  # minified Select id) exists but no wrapper yet.
+  applicable: 'createElement\(\s*\w+\s*,\s*\{\s*defaultValue:\s*\w+\s*,\s*defaultFocusValue:\s*\w+\s*,\s*options:\s*\w+\s*,\s*onChange:\s*\w+\s*,\s*onFocus:\s*\w+\s*,\s*onCancel:\s*\w+\s*,\s*visibleOptionCount:\s*\w+\s*\s*\}'
+codemod:
+  type: "node_script"
+  engine: "babel"
+  script: "codemods/codemod-model-picker-search.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "model"
+  config: []

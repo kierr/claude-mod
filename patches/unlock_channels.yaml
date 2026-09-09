@@ -1,0 +1,24 @@
+id: "unlock_channels"
+target: "claude-code"
+name: "Channels Force Enable"
+description: "Enable Channels on third-party API providers by bypassing provider, feature-flag, and policy gates."
+file_id: "cli"
+
+status_tests:
+  applied: '__channels_unnerfed'
+  # Anchor on the provider-restriction reason string, not a generated identifier.
+  # An upstream wording change requires rechecking applicability.
+  applicable: 'channels are not available on third-party providers'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-channels.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "features"
+  config: []
+
+order: 15

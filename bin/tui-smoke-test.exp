@@ -1,0 +1,90 @@
+#!/usr/bin/expect -f
+# TUI smoke test: spawn patched CLI in a real PTY, capture output, check for crashes.
+# Usage: expect bin/tui-smoke-test.exp <version> [extra-args...]
+# Exits 0 on startup success (including a crash-free timeout), 1 on failure,
+# or 2 for invalid arguments or a missing build.
+
+if {[llength $argv] < 1} {
+    puts "Usage: expect bin/tui-smoke-test.exp <version> \[extra-args...\]"
+    exit 2
+}
+
+set version [lindex $argv 0]
+set extra_args [lrange $argv 1 end]
+
+set timeout 10
+
+set home_dir $env(HOME)
+set patched [file join $home_dir ".cache" "claude-mods" $version "patched" "deobfuscated.js"]
+set crashlog [file join $home_dir ".cache" "claude-mods" $version "crash.log"]
+set apilog [file join $home_dir ".cache" "claude-mods" $version "bun-api.log"]
+set logfile "/tmp/claudezp-tui-smoke.log"
+
+if {![file exists $patched]} {
+    puts "Error: patched binary not found at $patched"
+    puts "Run: bun bin/patch.cjs patch $version"
+    exit 2
+}
+
+file delete $crashlog
+file delete $apilog
+
+file delete $logfile
+
+log_file -noappend $logfile
+
+set args [list $patched]
+foreach arg $extra_args {
+    lappend args $arg
+}
+
+spawn bun {*}$args
+
+# Wait for initial render or crash
+expect {
+    "ReferenceError" {
+        puts "\nCRASH: ReferenceError detected"
+        exec cat $crashlog 2>/dev/null
+        exit 1
+    }
+    "TypeError" {
+        puts "\nCRASH: TypeError detected"
+        exec cat $crashlog 2>/dev/null
+        exit 1
+    }
+    "FATAL" {
+        puts "\nCRASH: FATAL error detected"
+        exec cat $crashlog 2>/dev/null
+        exit 1
+    }
+    "Error:" {
+        puts "\nERROR: Error detected in output"
+        # Could be benign (e.g. "Not logged in"), continue
+    }
+    "Not logged in" {
+        puts "\nOK: CLI started, got 'Not logged in' (expected without auth)"
+        exit 0
+    }
+    timeout {
+        puts "\nOK: CLI ran for 10s without crash (timeout = success for TUI)"
+        exit 0
+    }
+    eof {
+        puts "\nEOF: Process exited"
+        set exitcode [wait]
+        if {[file exists $crashlog]} {
+            puts "CRASH LOG:"
+            exec cat $crashlog
+            exit 1
+        }
+        if {[lindex $exitcode 3] == 0} {
+            puts "Process exited cleanly (code 0)"
+            exit 0
+        } else {
+            puts "Process exited with code [lindex $exitcode 3]"
+            exit 1
+        }
+    }
+}
+
+exit 0

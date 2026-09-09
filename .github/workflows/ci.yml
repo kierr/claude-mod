@@ -1,0 +1,65 @@
+# Source-only CI. macOS/2.1.181 runtime verification is performed locally;
+# Linux and newer upstream versions are not supported by the first release.
+# Never cache/upload upstream bundles or derived artifacts.
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: node bin/lint-codemods.cjs
+      - run: node bin/fixture-audit.cjs
+      - name: Validate workflows and scan secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSfL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz | tar xz -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint"
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar xz -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" detect --source . --redact
+      - run: npm pack --dry-run
+  publish:
+    needs: checks
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # npm trusted publishing requires npm >=11.5.1, independent of Node.
+      - run: npm install -g npm@11.6.0
+      - name: Check release tag
+        run: test "${GITHUB_REF_NAME}" = "v$(node -p 'require("./package.json").version')"
+      - run: npm publish --provenance --access public
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes "Supports Claude Code $(cat last-tested-version) on macOS. Tool-only distribution; upstream code is downloaded and modified locally."

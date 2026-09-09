@@ -1,0 +1,136 @@
+id: "set_flags_and_policy"
+target: "claude-code"
+name: "Flags & Policy Overrides"
+description: "Override GrowthBook feature flags and policy gates from the Mods panel. Patches both the L_() flag resolver and V7() policy gate resolver to read from mods.json, covering all tengu_* flags and allow_* gates globally."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__pv7_key'
+  applicable: 'cachedGrowthBookFeatures'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-set-flags-and-policy.cjs"
+
+mod:
+  live: true
+  category: "features"
+  config:
+    # GrowthBook flags (feature_flags_* prefix in mods.json)
+    - key: "tengu_passport_quail"
+      type: "boolean"
+      default: true
+      label: "Auto-memory extraction"
+    - key: "tengu_session_memory"
+      type: "boolean"
+      default: true
+      label: "Session memory"
+    - key: "tengu_slate_thimble"
+      type: "boolean"
+      default: true
+      label: "Memory in non-interactive mode"
+    - key: "tengu_billiard_aviary"
+      type: "boolean"
+      default: false
+      label: "Use tiny_memory directory"
+    - key: "tengu_kairos_loop_dynamic"
+      type: "boolean"
+      default: true
+      label: "Dynamic /loop pacing"
+    - key: "tengu_kairos_push_notifications"
+      type: "boolean"
+      default: true
+      label: "Push notifications"
+    - key: "tengu_kairos_loop_prompt"
+      type: "boolean"
+      default: true
+      label: "Autonomous loop prompt"
+    - key: "tengu_kairos_input_needed_push"
+      type: "boolean"
+      default: true
+      label: "Input-needed push notifications"
+    - key: "tengu_kairos_loop_persistent"
+      type: "boolean"
+      default: true
+      label: "Persistent autonomous loop"
+    - key: "tengu_kairos_loop_keepalive"
+      type: "boolean"
+      default: true
+      label: "Loop keepalive heartbeat"
+    - key: "tengu_kairos_cron"
+      type: "boolean"
+      default: true
+      label: "Cron-driven autonomous loop"
+    - key: "tengu_kairos_cron_durable"
+      type: "boolean"
+      default: true
+      label: "Durable cron tasks"
+    - key: "tengu_amber_sentinel"
+      type: "boolean"
+      default: true
+      label: "Monitor tool"
+    - key: "tengu_onyx_plover"
+      type: "boolean"
+      default: true
+      label: "Auto-dream enable gate"
+    - key: "tengu_herring_clock"
+      type: "boolean"
+      default: true
+      label: "Memory system gate"
+    - key: "tengu_streaming_tool_execution2"
+      type: "boolean"
+      default: true
+      label: "Streaming tool execution"
+    - key: "tengu_coral_fern"
+      type: "boolean"
+      default: true
+      label: "Memory search in bg sessions"
+    - key: "tengu_ashen_kelp"
+      type: "boolean"
+      default: true
+      label: "MCP client refresh"
+    - key: "tengu_destructive_command_warning"
+      type: "boolean"
+      default: true
+      label: "Destructive command warnings"
+    - key: "tengu_harbor"
+      type: "boolean"
+      default: true
+      label: "Channels feature gate"
+    - key: "tengu_workflows_enabled"
+      type: "boolean"
+      default: true
+      label: "Dynamic workflows"
+    # Policy gates (policy_* prefix in mods.json)
+    - key: "allow_workflows"
+      type: "boolean"
+      default: true
+      label: "Workflows policy gate"
+    - key: "allow_remote_sessions"
+      type: "boolean"
+      default: true
+      label: "Remote sessions policy gate"
+    - key: "allow_remote_control"
+      type: "boolean"
+      default: true
+      label: "Remote control policy gate"
+    - key: "allow_web_fetch"
+      type: "boolean"
+      default: true
+      label: "Web fetch policy gate"
+    - key: "allow_memory_sync"
+      type: "boolean"
+      default: true
+      label: "Memory sync policy gate"
+    - key: "allow_voice_mode"
+      type: "boolean"
+      default: true
+      label: "Voice mode policy gate"
+    - key: "allow_quick_web_setup"
+      type: "boolean"
+      default: true
+      label: "Quick web setup policy gate"
+
+order: 2

@@ -1,0 +1,21 @@
+id: "coordinator_local_enable"
+target: "claude-code"
+name: "Coordinator Mode (Local)"
+description: "Activate CLAUDE_CODE_COORDINATOR_MODE in a local interactive terminal. The upstream rx() guard suppresses coordinator mode for any local TTY unless CLAUDE_CODE_REMOTE is set (a host identity flag that breaks auth under non-Anthropic routers). This wraps that guard so the env var alone activates coordinator mode locally. Headless claude -p already works without this patch."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__isModEnabled__\(\s*["\x27]coordinator_local_enable["\x27]\s*\)\s*\?\s*false\s*:\s*[\w$]+\(\)\s*&&\s*![\w$]+\(\)\s*&&\s*![\w$]+\(\s*process\.env\.CLAUDE_CODE_REMOTE\s*\)'
+  applicable: '[\w$]+\(\)\s*&&\s*![\w$]+\(\)\s*&&\s*![\w$]+\(\s*process\.env\.CLAUDE_CODE_REMOTE\s*\)'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-coordinator-local-enable.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "features"
+order: 9

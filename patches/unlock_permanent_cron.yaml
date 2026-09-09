@@ -1,0 +1,21 @@
+id: "unlock_permanent_cron"
+target: "claude-code"
+name: "Cron Permanent Tasks"
+description: "Add permanent parameter to CronCreate tool so scheduled tasks can be exempt from 7-day auto-expiry. The scheduler already supports !task.permanent in the expiry check — this patch wires the field through the tool schema, call(), and addCronTask function."
+file_id: "cli"
+
+status_tests:
+  applied: 'permanent: \w+\([\w$]+\.boolean\(\)\.optional\(\)\)\.describe\("true = exempt from 7-day auto-expiry'
+  applicable: 'durable: \w+\([\w$]+\.boolean\(\)\.optional\(\)\)\.describe\("true = persist to \.claude/scheduled_tasks\.json'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-permanent-cron.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "features"
+
+order: 60

@@ -1,0 +1,25 @@
+id: "remove_attribution"
+target: "claude-code"
+name: "Undercover Mode"
+description: "Suppress model identity, AI attribution, and Anthropic-internal information leaks when enabled"
+file_id: "cli"
+
+
+status_tests:
+  # applied: __isModEnabled__ guard referencing this mod is present
+  applied: '__isModEnabled__\(\s*["\x27]remove_attribution["\x27]\s*\)'
+
+  # applicable: Co-Authored-By attribution with Anthropic email exists in the bundle
+  applicable: 'Co-Authored-By.*noreply@anthropic\.com'
+
+codemod:
+  type: "node_script"
+  engine: "babel"
+  script: "codemods/codemod-remove-attribution.cjs"
+
+mod:
+  live: true
+  category: "display"
+
+
+order: 24

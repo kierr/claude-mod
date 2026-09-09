@@ -1,0 +1,50 @@
+id: "set_memory_limits"
+target: "claude-code"
+name: "Configurable Memory Limits"
+description: "Override memory truncation, scan, recall, and selector settings via the Mods panel (mods.json config)."
+file_id: "cli"
+
+status_tests:
+  # applied: the __getModConfig__ override is present
+  applied: '__getModConfig__\(\s*["\x27]set_memory_limits["\x27]'
+  # applicable: the truncation template with "first ... lines" exists (unpatched)
+  applicable: 'first \$\{[\w$]+\} lines'
+
+codemod:
+  type: "node_script"
+  engine: "babel"
+  script: "codemods/codemod-set-memory-limits.cjs"
+
+mod:
+  live: true
+  category: "features"
+  config:
+    - key: "max_lines"
+      type: "number"
+      default: 200
+      label: "Line truncation limit"
+    - key: "max_bytes"
+      type: "number"
+      default: 4096
+      label: "Byte truncation limit"
+    - key: "max_files"
+      type: "number"
+      default: 200
+      label: "File scan limit"
+    - key: "max_files_structured"
+      type: "number"
+      default: 500
+      label: "Structured-mode scan limit"
+    - key: "max_recall"
+      type: "number"
+      default: 5
+      label: "Max files recalled per turn"
+    - key: "selector_model"
+      type: "string"
+      default: ""
+      label: "Selector model (blank = stock)"
+    - key: "selector_max_tokens"
+      type: "number"
+      default: 256
+      label: "Selector max_tokens"
+order: 22

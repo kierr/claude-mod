@@ -1,0 +1,22 @@
+id: "unlock_auto_mode"
+target: "claude-code"
+name: "Auto Mode for All Models"
+description: "Make auto mode available for all models, including non-Anthropic providers."
+file_id: "cli"
+
+status_tests:
+  # applied: function has mod-guard with marker
+  applied: '__AMMB__'
+  # applicable: function has claude-opus-4-0 blocklist + claude-opus-4-7 allowlist
+  applicable: '"claude-opus-4-0"[\s\S]{0,2000}"claude-haiku-4-5"[\s\S]{0,2000}"claude-opus-4-7"[\s\S]{0,2000}"claude-sonnet-4-6"'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-auto-mode.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "model"
+order: 16

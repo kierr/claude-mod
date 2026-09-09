@@ -1,0 +1,62 @@
+# Lefthook dispatches Git hooks; mise.toml owns the commands.
+
+pre-commit:
+  parallel: true
+  commands:
+    check-yaml:
+      glob: "*.{yaml,yml}"
+      run: |
+        for f in {staged_files}; do
+          node -e "require('fs').readFileSync(process.argv[1],'utf8')" "$f" 2>/dev/null || exit 1
+        done
+
+    check-json:
+      glob: "*.json"
+      run: |
+        for f in {staged_files}; do
+          node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$f" || exit 1
+        done
+
+    check-large-files:
+      run: |
+        for f in {staged_files}; do
+          size=$(wc -c < "$f" 2>/dev/null || echo 0)
+          if [ "$size" -gt 512000 ]; then
+            echo "FAIL: $f is $(($size / 1024))KB (max 500KB)" >&2; exit 1
+          fi
+        done
+
+    unit-tests:
+      glob: "*.{cjs,js}"
+      run: bun test test/unit/
+
+    codemod-test-pairing:
+      glob: "codemods/*.cjs"
+      run: |
+        for f in {staged_files}; do
+          name=$(basename "$f" .cjs)
+          [ ! -f "test/unit/${name}.test.js" ] && echo "MISSING TEST: test/unit/${name}.test.js (for $f)" >&2 && exit 1
+        done
+
+    patch-codemod-ref:
+      glob: "patches/*.yaml"
+      run: |
+        for f in {staged_files}; do
+          script=$(grep -oP 'script:\s*"\K[^"]+' "$f")
+          [ -n "$script" ] && [ ! -f "$script" ] && echo "BROKEN REF: $f references missing $script" >&2 && exit 1
+        done
+
+pre-push:
+  commands:
+    secrets:
+      run: mise run gate:secrets
+
+    workflows:
+      glob: ".github/workflows/*.{yaml,yml}"
+      run: mise run gate:workflows
+
+    test:
+      run: mise run gate:test
+
+    version-compat:
+      run: mise run gate:version-compat

@@ -1,0 +1,65 @@
+id: "fix_request_resilience"
+target: "claude-code"
+name: "API Error Resilience"
+description: "Un-nerf subscriber-tier retry gates, expose persistent-retry timing knobs (the env can't), and broaden which transient errors retry — incl. non-429 statuses and message patterns. On/off persistent retry itself is the CLAUDE_CODE_RETRY_WATCHDOG env var (no patch needed for that); this mod exposes what the env cannot."
+file_id: "cli"
+order: 13
+
+status_tests:
+  applied: '__apiResRetryExtra__|__apiResCap__|__isModEnabled__\s*\(\s*["\x27]fix_request_resilience'
+  applicable: 'instanceof\s+[\w$]+\s*&&\s*[\w$]+\.status\s*===\s*429|anthropic-ratelimit-unified-reset|process\.env\.FALLBACK_FOR_ALL_PRIMARY_MODELS'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-fix-request-resilience.cjs"
+
+mod:
+  live: true
+  category: "reliability"
+  config:
+    # --- Persistent-retry timing knobs (require CLAUDE_CODE_RETRY_WATCHDOG=1) ---
+    - key: "persistent_cap_hours"
+      type: "number"
+      default: 6
+      min: 1
+      max: 48
+      label: "Persistent retry cap (hours)"
+      env_check: "CLAUDE_CODE_RETRY_WATCHDOG"
+      env_hint: "Needs CLAUDE_CODE_RETRY_WATCHDOG=1; this knob tunes the max wait (upstream hardcodes 6h)."
+    - key: "persistent_backoff_max_seconds"
+      type: "number"
+      default: 0
+      min: 0
+      max: 3600
+      label: "Persistent backoff ceiling sec (0 = upstream default)"
+      env_check: "CLAUDE_CODE_RETRY_WATCHDOG"
+      env_hint: "Needs CLAUDE_CODE_RETRY_WATCHDOG=1; 0 keeps the upstream backoff ceiling."
+    # --- Retryable-set broadening (no env equivalent; patch is the only path) ---
+    - key: "retry_extra_statuses"
+      type: "string"
+      default: "408,502,503,504"
+      label: "Extra retryable HTTP statuses (comma-sep)"
+      env_hint: "No env equivalent — patch only. Added to lv7 (the retryable set)."
+    - key: "retry_extra_patterns"
+      type: "string"
+      default: "Invalid HTTP request received,ConnectionInputs.RECV_DATA in state ConnectionState.CLOSED"
+      label: "Extra retryable error messages (comma-sep substrings)"
+      env_hint: "No env equivalent — patch only. Matches any error class by message (incl. connection errors)."
+    # --- Model fallback (existing fallback-loosen) ---
+    - key: "min_status"
+      type: "number"
+      default: 500
+      min: 400
+      max: 599
+      label: "Fallback min HTTP status"
+    - key: "all_models"
+      type: "boolean"
+      default: true
+      label: "Fallback for all models (not just Opus)"
+    - key: "threshold"
+      type: "number"
+      default: 1
+      min: 1
+      max: 10
+      label: "Fallback consecutive-error threshold"

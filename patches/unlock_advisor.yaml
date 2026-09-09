@@ -1,0 +1,33 @@
+id: "unlock_advisor"
+target: "claude-code"
+name: "Advisor Tool"
+description: "Make the server-side advisor tool (second-opinion model) fully usable regardless of provider, including the model picker and /advisor <model>. Four client-side gates are bypassed when the mod is on: (1) the master enable predicate (Pc) — skipping the firstParty provider gate and the tengu_sage_compass2 GrowthBook flag; (2) the runtime resolver (nGK) — skipping the three model-pairing checks (base-model support, valid-advisor, advisor-tier >= main) that otherwise reject a custom/non-tier main model on a proxy; (3) the cGK() selection/UI chokepoint — collapsing wGH(main) and xmH(main,adv) to 'supported' everywhere they gate the picker warning, status line, note, and startup --advisor; (4) the fGH(advisor) validity predicate — skipping the M4 allowlist + tier checks so any model is a valid advisor, unblocking /advisor <model>, the note, the slash validator, and the mK_() picker filter (dropdown then lists the hardcoded fable/opus/sonnet tiers). The CLAUDE_CODE_DISABLE_ADVISOR_TOOL kill switch still wins. The advisor remains a server-side tool: the backing API/gateway must still execute the call, which a non-Anthropic backend may not honor. Custom GLM models are reachable via the typed /advisor <model> command; only the three Claude tiers appear in the picker dropdown (enumerating the dynamic registry is out of scope)."
+file_id: "cli"
+
+status_tests:
+  # All four injection markers present AND in source order: ENABLE (in Pc, ~445324)
+  # → CGK (in cGK, ~445336) → FGH (in fGH, ~445368) → PAIRING (in nGK, ~445406).
+  # Requiring all four catches the case where the runtime path is patched (1 & 2)
+  # but the selection/UI layer has drifted (3 & 4 skip) — otherwise the advisor
+  # would "enable" and the resolver would run, but the picker stays empty, the
+  # warning still prints, and /advisor <model> is rejected on a proxy.
+  # RATIONALE: do NOT rewrite as pure lookaheads (?=[\s\S]*X) — verified 2026-06-16
+  # that they hang patternExistsIn on the marker-less baseline (zero-width-capable
+  # pattern retries from every position in the 25MB bundle, each lookahead re-scanning
+  # the full file). The leading __ADVISOR_ENABLE__ literal lets V8 short-circuit on
+  # the marker-less baseline in ~2ms. Would need V8 to drop literal-prefix optimization
+  # to reconsider.
+  applied: '__ADVISOR_ENABLE__[\s\S]*__ADVISOR_CGK__[\s\S]*__ADVISOR_FGH__[\s\S]*__ADVISOR_PAIRING__'
+  applicable: '\w+\(process\.env\.CLAUDE_CODE_DISABLE_ADVISOR_TOOL\)\)\s*\{'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-advisor.cjs"
+
+mod:
+  section: "unlock"
+  backend_required: true
+  live: true
+  category: "features"
+order: 8

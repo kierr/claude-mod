@@ -1,0 +1,21 @@
+id: "unlock_agent_view"
+target: "claude-code"
+name: "Unlock Agent Provider Settings"
+description: "Enable the agent view and third-party provider settings regardless of disable flags and GrowthBook gates."
+file_id: "cli"
+order: 5
+
+status_tests:
+  applied: '__AVFE__'
+  applicable: 'CLAUDE_CODE_DISABLE_AGENT_VIEW\)\s*\|\||disableAgentView'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-agent-view.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "features"
+  config: []

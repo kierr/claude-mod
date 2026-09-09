@@ -1,0 +1,28 @@
+id: "set_cyber_risk_instruction"
+target: "claude-code"
+name: "Configurable Cyber-Risk Instruction"
+description: "Override the hardcoded security instruction via the Mods panel (tri-state: blank = stock, empty = clear, text = custom)."
+file_id: "cli"
+
+status_tests:
+  # applied: var init now reads __getModConfig__
+  applied: '__getModConfig__\(\s*["\x27]set_cyber_risk_instruction["\x27]'
+  # applicable: var declaration with the security instruction string (any var name)
+  applicable: 'var [\w$]+ = "IMPORTANT: Assist with authorized security testing'
+
+codemod:
+  type: "node_script"
+  engine: "babel"
+  script: "codemods/codemod-set-cyber-risk-instruction.cjs"
+
+mod:
+  live: false
+  category: "features"
+  config:
+    - key: "instruction"
+      type: "string"
+      default: ""
+      label: "Cyber-risk instruction (empty = clear)"
+
+
+order: 6

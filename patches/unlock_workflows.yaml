@@ -1,0 +1,22 @@
+id: "unlock_workflows"
+target: "claude-code"
+name: "Dynamic Workflows"
+description: "Enable dynamic workflows and the /workflows command for non-Anthropic providers. Bypasses the allow_workflows policy gate, tengu_workflows_enabled GrowthBook flag, and subscription plan checks."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__isModEnabled__\(\s*["\x27]unlock_workflows["\x27]\s*\)'
+  applicable: 'allow_workflows'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-workflows.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "features"
+
+order: 6

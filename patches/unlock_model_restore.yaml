@@ -1,0 +1,21 @@
+id: "unlock_model_restore"
+target: "claude-code"
+name: "Model Restore — accept unknown families"
+description: "Fix session resume downgrading custom / non-Anthropic models to opus. The restore classifier kU4() rejects any model whose family is not in the known first-party set with reason 'unknown_family' (\"not a model this version of Claude Code recognizes\"), so resuming a session last run on glm-5.2 (or any third-party id) silently falls back to opus. The outer guard JgH() only skips restore for non-firstParty providers, and a gateway/proxy is detected as firstParty — so the classifier still runs and rejects every custom model. This patch removes the 'unknown_family' branch; the remaining not_allowed / retired checks stay."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__MODEL_RESTORE_OK__'
+  applicable: '\?\s*"unknown_family"\s*:\s*[^;\n]{0,120}\?\s*"not_allowed"'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-model-restore.cjs"
+
+mod:
+  section: "unlock"
+  live: false
+  category: "reliability"
+order: 18
