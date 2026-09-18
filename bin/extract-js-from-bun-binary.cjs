@@ -249,11 +249,22 @@ function detectHeaderSize(sectionBuffer, trailerOffset, offsets) {
 }
 
 /**
- * Parse the Bun section payload and extract main module JS.
+ * Parse the Bun section payload and return structured module data.
  *
  * The section contains: [optional size header][blob: data + module table + OFFSETS + trailer]
  * We find the trailer, read OFFSETS, locate the module table, and extract
- * the entry point module's contents.
+ * all module contents.
+ *
+ * @returns {{
+ *   entryPointId: number,
+ *   modules: Array<{
+ *     index: number,
+ *     name: string,
+ *     content: string | null,
+ *     isText: boolean,
+ *     contentLength: number
+ *   }>
+ * }}
  */
 function parseBunSection(sectionBuffer) {
   if (sectionBuffer.length < OFFSETS_SIZE + TRAILER.length) {
@@ -318,20 +329,157 @@ function parseBunSection(sectionBuffer) {
     );
   }
 
-  // Extract the entry point module's contents
-  const mod = parseModule(sectionBuffer, modulesOffset + offsets.entryPointId * moduleSize);
-  const contentsOffset = blobBase + mod.contents.offset;
-  const contentsLength = mod.contents.length;
+  // Parse ALL modules
+  const modules = [];
+  for (let i = 0; i < moduleCount; i++) {
+    const mod = parseModule(sectionBuffer, modulesOffset + i * moduleSize);
+    const nameOffset = blobBase + mod.name.offset;
+    const nameLength = mod.name.length;
+    const name = sectionBuffer.subarray(nameOffset, nameOffset + nameLength).toString("utf8");
 
-  if (contentsOffset + contentsLength > logicalBlobEnd) {
-    throw new Error(
-      `Contents extends beyond blob: offset=${contentsOffset}, ` +
-      `length=${contentsLength}, blobEnd=${logicalBlobEnd}`
+    const contentsOffset = blobBase + mod.contents.offset;
+    const contentsLength = mod.contents.length;
+
+    // Check if content is text JS (starts with // @bun or similar) or binary bytecode
+    let isText = false;
+    let content = null;
+    if (contentsLength > 0 && contentsOffset + contentsLength <= logicalBlobEnd) {
+      const firstBytes = sectionBuffer.subarray(contentsOffset, contentsOffset + Math.min(50, contentsLength));
+      // Text JS modules start with // @bun, // Claude, or contain function keywords early
+      // Binary/bytecode modules contain non-printable bytes
+      const first50 = firstBytes.toString("utf8");
+      isText = /^[\x20-\x7E\n\r\t\/]/.test(first50) &&
+        (first50.startsWith("// @bun") || first50.startsWith("// Claude") ||
+         first50.startsWith("import") || first50.startsWith("const") ||
+         first50.startsWith("var ") || first50.startsWith("function") ||
+         first50.startsWith("/*") || first50.startsWith("(function"));
+
+      if (isText) {
+        content = sectionBuffer.subarray(contentsOffset, contentsOffset + contentsLength).toString("utf8");
+      }
+    }
+
+    modules.push({
+      index: i,
+      name,
+      content,
+      isText,
+      contentLength: contentsLength,
+    });
+  }
+
+  return { entryPointId: offsets.entryPointId, modules };
+}
+
+/**
+ * Detect whether a parsed Bun section uses code-split ESM modules
+ * (newer Bun versions) vs a single monolithic CJS IIFE (older versions).
+ *
+ * Code-split: entry point imports from "/$bunfs/root/chunk-*.js"
+ * Monolithic: entry point is a single large CJS IIFE
+ */
+function isCodeSplit(parsed) {
+  const entry = parsed.modules[parsed.entryPointId];
+  if (!entry || !entry.content) return false;
+  // Code-split entry points import from /$bunfs/root/chunk-*.js
+  // Matches both: import{X}from"/$bunfs/root/..." and import("/$bunfs/root/...")
+  return entry.content.includes("/$bunfs/root/");
+}
+
+/**
+ * Extract the entry point module's JS source (legacy single-module format).
+ */
+function extractEntryPoint(parsed) {
+  const entry = parsed.modules[parsed.entryPointId];
+  if (!entry || !entry.content) {
+    throw new Error("Entry point module has no text content");
+  }
+  return entry.content;
+}
+
+/**
+ * Rewrite /$bunfs/root/ import paths to relative ./ paths in JS source.
+ * Handles static imports, dynamic imports, and re-exports.
+ */
+function rewriteBunfsImports(code) {
+  // Static imports: from "/$bunfs/root/chunk-xxx.js" → from "./chunk-xxx.js"
+  // Also handles: import("/$bunfs/root/chunk-xxx.js") → import("./chunk-xxx.js")
+  // Use string replacement since $ is a special regex character
+  return code.split("/$bunfs/root/").join("./");
+}
+
+/**
+ * Extract all JS modules from a code-split Bun binary to a directory.
+ *
+ * Creates:
+ *   <outputDir>/cli.js          - entry point (with rewritten imports)
+ *   <outputDir>/chunk-xxx.js    - chunk modules (with rewritten imports)
+ *   <outputDir>/concatenated.js - all modules concatenated for single-file patching
+ *
+ * Returns the path to the entry point.
+ */
+function extractCodeSplitModules(parsed, outputDir) {
+  const entry = parsed.modules[parsed.entryPointId];
+  if (!entry || !entry.content) {
+    throw new Error("Entry point module has no text content");
+  }
+
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  let textModuleCount = 0;
+  let totalTextSize = 0;
+  const concatenatedParts = [];
+
+  for (const mod of parsed.modules) {
+    if (!mod.isText || !mod.content) continue;
+
+    // Determine the filename from the module name
+    // /$bunfs/root/chunk-xxx.js → chunk-xxx.js
+    // /$bunfs/root/cli → cli.js
+    // /$bunfs/root/src/foo/bar.js → src/foo/bar.js
+    let filename;
+    if (mod.name === "/$bunfs/root/cli") {
+      filename = "cli.js";
+    } else if (mod.name.startsWith("/$bunfs/root/")) {
+      filename = mod.name.slice("/$bunfs/root/".length);
+    } else if (mod.name.endsWith(".js")) {
+      filename = path.basename(mod.name);
+    } else {
+      // Skip non-JS modules (assets, .node binaries, etc.)
+      continue;
+    }
+
+    // Rewrite /$bunfs/root/ imports to relative ./ paths
+    const rewritten = rewriteBunfsImports(mod.content);
+
+    const filePath = path.join(outputDir, filename);
+    // Ensure subdirectory exists
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, rewritten, "utf8");
+
+    textModuleCount++;
+    totalTextSize += rewritten.length;
+
+    // Build concatenated output with module boundary markers
+    // These markers allow splitting the file back after patching
+    concatenatedParts.push(
+      `// __MODULE_START__ ${JSON.stringify(mod.name)} __MODULE_INDEX__ ${mod.index} __
+${rewritten}
+// __MODULE_END__ ${JSON.stringify(mod.name)} __
+`
     );
   }
 
-  const jsSource = sectionBuffer.subarray(contentsOffset, contentsOffset + contentsLength).toString("utf8");
-  return jsSource;
+  // Write the concatenated file for the single-file patch pipeline
+  const concatPath = path.join(outputDir, "concatenated.js");
+  fs.writeFileSync(concatPath, concatenatedParts.join("\n"), "utf8");
+
+  console.error(`  Extracted ${textModuleCount} text modules (${Math.round(totalTextSize / 1024 / 1024)}MB)`);
+  console.error(`  Concatenated output: ${concatPath}`);
+
+  // Entry point path
+  const entryFilename = entry.name === "/$bunfs/root/cli" ? "cli.js" : path.basename(entry.name);
+  return path.join(outputDir, entryFilename);
 }
 
 // Main extraction flow
@@ -352,18 +500,40 @@ async function extractJS(binaryPath, outputPath) {
   }
 
   try {
-    // Step 2: Parse the section and extract JS
+    // Step 2: Parse the section and extract modules
     const sectionBuffer = fs.readFileSync(sectionPath);
     console.error(`Section size: ${sectionBuffer.length} bytes`);
 
-    const jsSource = parseBunSection(sectionBuffer);
-    console.error(`Extracted JS: ${jsSource.length} bytes, ${jsSource.split("\n").length} lines`);
+    const parsed = parseBunSection(sectionBuffer);
+    const codeSplit = isCodeSplit(parsed);
 
-    // Step 3: Write to output
-    fs.writeFileSync(outputPath, jsSource, "utf8");
-    console.error(`Wrote: ${outputPath}`);
+    if (codeSplit) {
+      console.error(`Detected code-split binary (${parsed.modules.filter(m => m.isText).length} text modules)`);
 
-    return outputPath;
+      // Extract all modules to a directory
+      const outputDir = path.dirname(outputPath);
+      const chunksDir = path.join(outputDir, "chunks");
+      const entryPath = extractCodeSplitModules(parsed, chunksDir);
+
+      // Write the concatenated file as cli.js for the single-file pipeline
+      const concatPath = path.join(chunksDir, "concatenated.js");
+      fs.copyFileSync(concatPath, outputPath);
+      console.error(`Extracted JS (concatenated): ${fs.statSync(outputPath).size} bytes`);
+      console.error(`Wrote: ${outputPath}`);
+      console.error(`Chunks directory: ${chunksDir}`);
+      console.error(`Entry point: ${entryPath}`);
+
+      return { outputPath, codeSplit: true, chunksDir, entryPath };
+    } else {
+      // Legacy single-module format
+      const jsSource = extractEntryPoint(parsed);
+      console.error(`Extracted JS: ${jsSource.length} bytes, ${jsSource.split("\n").length} lines`);
+
+      fs.writeFileSync(outputPath, jsSource, "utf8");
+      console.error(`Wrote: ${outputPath}`);
+
+      return { outputPath, codeSplit: false };
+    }
   } finally {
     if (sectionPath && sectionPath !== outputPath && fs.existsSync(sectionPath)) {
       fs.unlinkSync(sectionPath);
@@ -387,4 +557,12 @@ if (require.main === module) {
   });
 }
 
-module.exports = { extractJS, parseBunSection, getPlatformInfo };
+module.exports = {
+  extractJS,
+  parseBunSection,
+  getPlatformInfo,
+  isCodeSplit,
+  extractEntryPoint,
+  extractCodeSplitModules,
+  rewriteBunfsImports,
+};
