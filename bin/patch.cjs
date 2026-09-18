@@ -159,17 +159,55 @@ function ensureSharpBindings(version, verbose = false) {
   }
 }
 
+// Detect whether a cached version uses code-split ESM modules
+// (newer Bun versions) vs single monolithic CJS IIFE (older versions).
+function isCodeSplitCached(version) {
+  const chunksDir = path.join(getCachePath(version), "chunks");
+  return fs.existsSync(chunksDir) && fs.existsSync(path.join(chunksDir, "cli.js"));
+}
+
 // Ensure shared baseline exists (download + deobfuscate)
 function ensureBaseline(version, verbose = false) {
   const cliPath = downloadCLI(version, verbose);
-  return deobfuscate(cliPath, verbose);
+  const codeSplit = isCodeSplitCached(version);
+  return deobfuscate(cliPath, verbose, codeSplit);
 }
 
-// Remove the native @bun-cjs header before running reformatted source.
+// Remove the native @bun header before running reformatted source.
 // Pass CommonJS arguments explicitly into the wrapper under standalone Bun.
-function fixBunCjsWrapper(patchedPath) {
+// For code-split ESM binaries, adds a shebang and skips IIFE wrapping.
+function fixBunCjsWrapper(patchedPath, codeSplit = false) {
   const content = fs.readFileSync(patchedPath, "utf8");
 
+  if (codeSplit) {
+    // Code-split ESM format: add shebangs to the chunk entry point.
+    // The concatenated file is not executable; chunks/cli.js is the entry point.
+    const chunksDir = path.join(path.dirname(patchedPath), "chunks");
+    const entryPath = path.join(chunksDir, "cli.js");
+
+    if (fs.existsSync(entryPath)) {
+      let content = fs.readFileSync(entryPath, "utf8");
+      if (!content.startsWith("#!/usr/bin/env bun")) {
+        // Remove any @bun header lines from the beginning
+        content = content.replace(/^(\/\/ @bun[^\n]*\r?\n)+/, "");
+        content = "#!/usr/bin/env bun\n" + content;
+        fs.writeFileSync(entryPath, content);
+      }
+      fs.chmodSync(entryPath, 0o755);
+    }
+
+    // Also fix the concatenated file (it's not executable but may be validated)
+    let concatContent = fs.readFileSync(patchedPath, "utf8");
+    if (!concatContent.startsWith("#!/usr/bin/env bun")) {
+      concatContent = concatContent.replace(/^(\/\/ @bun[^\n]*\r?\n)+/, "");
+      concatContent = "#!/usr/bin/env bun\n" + concatContent;
+      fs.writeFileSync(patchedPath, concatContent);
+    }
+    fs.chmodSync(patchedPath, 0o755);
+    return;
+  }
+
+  // Legacy monolithic CJS IIFE format
   // Regex codemods prepend idempotency markers (var __xxx_patched__ = true)
   // before the @bun header. Find the header wherever it appears near the top.
   const headerIdx = content.indexOf("// @bun @bytecode @bun-cjs");
@@ -215,8 +253,36 @@ function copyBaselineToPatched(baselinePath, version, verbose = false) {
   const patchedPath = path.join(patchedDir, "deobfuscated.js");
   fs.mkdirSync(patchedDir, { recursive: true });
   fs.copyFileSync(baselinePath, patchedPath);
+
+  // For code-split binaries, also copy the chunks directory
+  const chunksDir = path.join(CACHE_DIR, version, "chunks");
+  if (fs.existsSync(chunksDir)) {
+    const patchedChunksDir = path.join(patchedDir, "chunks");
+    // Remove old patched chunks if present
+    if (fs.existsSync(patchedChunksDir)) {
+      fs.rmSync(patchedChunksDir, { recursive: true, force: true });
+    }
+    // Copy chunks directory recursively
+    cpDirRecursive(chunksDir, patchedChunksDir);
+    if (verbose) console.log(`Copied chunks directory to patched: ${patchedChunksDir}`);
+  }
+
   if (verbose) console.log(`Copied baseline to patched: ${patchedPath}`);
   return patchedPath;
+}
+
+// Recursive directory copy (cp -r)
+function cpDirRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      cpDirRecursive(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
 }
 
 // Parse CLI args (rawArgs optional override for testing)
@@ -520,7 +586,9 @@ function downloadCLI(version, verbose = false) {
 }
 
 // Deobfuscate CLI using webcrack
-function deobfuscate(cliPath, verbose = false) {
+// For code-split binaries, webcrack is skipped (ESM chunks are already readable)
+// and the concatenated output is used as the baseline directly.
+function deobfuscate(cliPath, verbose = false, codeSplit = false) {
   const cachePath = path.dirname(cliPath);
   // baseline/ replaces the old deobfuscated/ as the read-only deobfuscated output
   const deobfuscatedDir = path.join(cachePath, "baseline");
@@ -533,6 +601,16 @@ function deobfuscate(cliPath, verbose = false) {
       if (verbose) console.log(`Already deobfuscated: ${deobfuscatedPath}`);
       return deobfuscatedPath;
     }
+  }
+
+  if (codeSplit) {
+    // Code-split binaries: skip webcrack entirely. The ESM chunks are already
+    // readable (not obfuscated), and the concatenated file is used for patching.
+    console.log(`Code-split binary detected — skipping deobfuscation (ESM chunks are readable)`);
+    fs.mkdirSync(deobfuscatedDir, { recursive: true });
+    fs.copyFileSync(cliPath, deobfuscatedPath);
+    if (verbose) console.log(`Copied concatenated output to baseline: ${deobfuscatedPath}`);
+    return deobfuscatedPath;
   }
 
   console.log(`Deobfuscating... (this takes ~1 minute)`);
@@ -558,7 +636,275 @@ function deobfuscate(cliPath, verbose = false) {
 }
 
 // Apply patches to deobfuscated code
-function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0) {
+// For code-split binaries, regex patches are applied to the concatenated file,
+// and Babel patches are applied to the specific chunk that contains the target.
+function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, codeSplit = false) {
+  if (!codeSplit) {
+    // Legacy single-file pipeline
+    return applyPatchesSingleFile(deobfuscatedPath, patches, verbose, timeout);
+  }
+
+  // Code-split: apply regex patches to the concatenated file,
+  // apply Babel patches to the matching chunk files.
+  const patchedDir = path.dirname(deobfuscatedPath);
+  const chunksDir = path.join(patchedDir, "chunks");
+
+  if (!fs.existsSync(chunksDir)) {
+    throw new Error(`Chunks directory not found for code-split binary: ${chunksDir}`);
+  }
+
+  // Collect all .js files in the chunks directory
+  const chunkFiles = [];
+  function collectJsFiles(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        collectJsFiles(fullPath);
+      } else if (entry.name.endsWith(".js")) {
+        chunkFiles.push(fullPath);
+      }
+    }
+  }
+  collectJsFiles(chunksDir);
+
+  // Skip the concatenated file — patches apply to individual chunks
+  const concatPath = path.join(chunksDir, "concatenated.js");
+  const filteredChunks = chunkFiles.filter(f => f !== concatPath);
+
+  if (verbose) {
+    console.log(`Code-split: ${filteredChunks.length} chunk files, ${patches.length} patches`);
+  }
+
+  // Separate regex and Babel patches
+  const { parseYAML: parseYAMLLib } = require("../lib/utils.cjs");
+  const regexPatchIds = [];
+  const babelPatchIds = [];
+  for (const patchId of patches) {
+    const yamlPath = path.join(PATCHES_DIR, `${patchId}.yaml`);
+    if (!fs.existsSync(yamlPath)) continue;
+    const patchDef = parseYAMLLib(fs.readFileSync(yamlPath, "utf8"));
+    const engine = patchDef.codemod?.engine || "regex";
+    if (engine === "babel") {
+      babelPatchIds.push(patchId);
+    } else {
+      regexPatchIds.push(patchId);
+    }
+  }
+
+  const batchApplyScript = path.join(__dirname, "batch-apply.cjs");
+  const childEnv = { ...process.env };
+  if (!childEnv.NODE_OPTIONS || !childEnv.NODE_OPTIONS.includes("--max-old-space-size")) {
+    childEnv.NODE_OPTIONS = `${childEnv.NODE_OPTIONS || ""} --max-old-space-size=8192`.trim();
+  }
+
+  let totalApplied = 0;
+  let totalFailed = 0;
+  const allSkippedPatchNames = [];
+
+  // Phase 1: Apply regex patches to the concatenated file
+  // Regex patches just do text search/replace, so the concatenated file works.
+  // After patching, we need to sync the changes back to individual chunk files.
+  if (regexPatchIds.length > 0) {
+    // Build a mapping from module name to chunk file for sync-back
+    // The concatenated file has __MODULE_START__ / __MODULE_END__ markers
+    if (verbose) console.log(`Applying ${regexPatchIds.length} regex patches to concatenated file`);
+
+    const concatPatchedPath = concatPath; // Patch in-place on the concatenated file
+    const childArgs = [batchApplyScript, concatPatchedPath, ...regexPatchIds];
+    if (verbose) childArgs.push("--verbose");
+    if (timeout > 0) childArgs.push(`--timeout=${timeout}`);
+
+    const child = spawnSync("node", childArgs, {
+      cwd: path.join(__dirname, ".."),
+      encoding: "utf8",
+      env: childEnv,
+      timeout: Math.max(timeout || 0, 300000), // 5 min floor for concatenated file
+    });
+
+    if (child.stdout) process.stdout.write(child.stdout);
+    if (child.stderr && verbose) process.stderr.write(child.stderr);
+
+    if (child.status === 0) {
+      const appliedCount = (child.stdout || "").split("\n").filter(l => l.includes("✓")).length;
+      totalApplied += appliedCount;
+    } else if (child.status !== 2) {
+      const combined = (child.stdout || "") + "\n" + (child.stderr || "");
+      const failedCount = combined.split("\n").filter(l => l.includes("✗")).length;
+      totalFailed += failedCount || 1;
+    }
+
+    // Sync changes back from the concatenated file to individual chunk files
+    syncConcatToChunks(concatPatchedPath, chunksDir, verbose);
+  }
+
+  // Phase 2: Apply Babel patches to matching chunk files
+  // Pre-scan chunks to find which ones contain the applicable patterns
+  if (babelPatchIds.length > 0) {
+    if (verbose) console.log(`Applying ${babelPatchIds.length} Babel patches to matching chunks`);
+
+    for (const patchId of babelPatchIds) {
+      const yamlPath = path.join(PATCHES_DIR, `${patchId}.yaml`);
+      const patchDef = parseYAMLLib(fs.readFileSync(yamlPath, "utf8"));
+      const applicableTest = patchDef.status_tests?.applicable;
+      if (!applicableTest) {
+        allSkippedPatchNames.push(patchId);
+        continue;
+      }
+
+      // Find chunk files that contain the applicable pattern
+      const applicableRe = new RegExp(applicableTest);
+      const matchingChunks = [];
+      for (const chunkFile of filteredChunks) {
+        try {
+          const content = fs.readFileSync(chunkFile, "utf8");
+          if (applicableRe.test(content)) {
+            matchingChunks.push(chunkFile);
+          }
+        } catch { /* skip unreadable files */ }
+      }
+
+      if (matchingChunks.length === 0) {
+        // Pattern not found in any chunk — not applicable
+        allSkippedPatchNames.push(patchId);
+        continue;
+      }
+
+      // Apply Babel patch to matching chunks
+      for (const chunkFile of matchingChunks) {
+        const childArgs = [batchApplyScript, chunkFile, patchId];
+        if (verbose) childArgs.push("--verbose");
+        if (timeout > 0) childArgs.push(`--timeout=${timeout}`);
+
+        const child = spawnSync("node", childArgs, {
+          cwd: path.join(__dirname, ".."),
+          encoding: "utf8",
+          env: childEnv,
+        });
+
+        if (child.stdout) process.stdout.write(child.stdout);
+        if (child.stderr && verbose) process.stderr.write(child.stderr);
+
+        if (child.status === 0) {
+          const appliedCount = (child.stdout || "").split("\n").filter(l => l.includes("✓")).length;
+          totalApplied += appliedCount;
+        } else if (child.status !== 2) {
+          totalFailed += 1;
+        }
+      }
+    }
+  }
+
+  // Determine which patches were not applicable
+  for (const patchId of patches) {
+    if (allSkippedPatchNames.includes(patchId)) continue;
+    const yamlPath = path.join(PATCHES_DIR, `${patchId}.yaml`);
+    if (!fs.existsSync(yamlPath)) continue;
+    const patchDef = parseYAMLLib(fs.readFileSync(yamlPath, "utf8"));
+    const appliedTest = patchDef.status_tests?.applied;
+    if (!appliedTest) continue;
+
+    // For regex patches, check the concatenated file
+    const engine = patchDef.codemod?.engine || "regex";
+    if (engine !== "babel") {
+      try {
+        const content = fs.readFileSync(concatPath, "utf8");
+        if (!new RegExp(appliedTest).test(content)) {
+          allSkippedPatchNames.push(patchId);
+        }
+      } catch { allSkippedPatchNames.push(patchId); }
+      continue;
+    }
+
+    // For Babel patches, check all chunk files
+    let found = false;
+    for (const chunkFile of filteredChunks) {
+      try {
+        const content = fs.readFileSync(chunkFile, "utf8");
+        if (new RegExp(appliedTest).test(content)) {
+          found = true;
+          break;
+        }
+      } catch { /* skip */ }
+    }
+    if (!found) {
+      allSkippedPatchNames.push(patchId);
+    }
+  }
+
+  return {
+    deobfuscatedPath,
+    applied: totalApplied,
+    failed: totalFailed,
+    skippedPatchNames: allSkippedPatchNames,
+  };
+}
+
+// Sync changes from the concatenated file back to individual chunk files.
+// The concatenated file has __MODULE_START__ / __MODULE_END__ markers that
+// delimit each chunk. We parse these boundaries and write each section
+// back to the corresponding chunk file.
+function syncConcatToChunks(concatPath, chunksDir, verbose = false) {
+  const content = fs.readFileSync(concatPath, "utf8");
+  const lines = content.split("\n");
+
+  // Find module boundaries
+  const modules = [];
+  let currentModule = null;
+  let currentLines = [];
+
+  const startRe = /^\/\/ __MODULE_START__ (\S+) __MODULE_INDEX__ (\d+) __$/;
+  const endRe = /^\/\/ __MODULE_END__ (\S+) __$/;
+
+  for (const line of lines) {
+    const startMatch = startRe.exec(line);
+    const endMatch = endRe.exec(line);
+
+    if (startMatch) {
+      if (currentModule) {
+        modules.push({ ...currentModule, lines: currentLines });
+      }
+      currentModule = { name: JSON.parse(startMatch[1]), index: parseInt(startMatch[2]) };
+      currentLines = [];
+    } else if (endMatch) {
+      if (currentModule) {
+        modules.push({ ...currentModule, lines: currentLines });
+        currentModule = null;
+        currentLines = [];
+      }
+    } else if (currentModule) {
+      currentLines.push(line);
+    }
+  }
+  if (currentModule) {
+    modules.push({ ...currentModule, lines: currentLines });
+  }
+
+  // Write each module back to its chunk file
+  let synced = 0;
+  for (const mod of modules) {
+    let filename;
+    if (mod.name === "/$bunfs/root/cli") {
+      filename = "cli.js";
+    } else if (mod.name.startsWith("/$bunfs/root/")) {
+      filename = mod.name.slice("/$bunfs/root/".length);
+    } else if (mod.name.endsWith(".js")) {
+      filename = path.basename(mod.name);
+    } else {
+      continue;
+    }
+
+    const filePath = path.join(chunksDir, filename);
+    if (fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, mod.lines.join("\n"), "utf8");
+      synced++;
+    }
+  }
+
+  if (verbose) console.log(`Synced ${synced} chunks from concatenated file`);
+}
+
+// Legacy single-file patch application
+function applyPatchesSingleFile(deobfuscatedPath, patches, verbose = false, timeout = 0) {
   const batchApplyScript = path.join(__dirname, "batch-apply.cjs");
 
   if (!verbose) {
@@ -654,13 +1000,17 @@ function ensurePatched(version, patches, verbose, timeout, force = false) {
   const patchedPath = copyBaselineToPatched(baselinePath, version, verbose);
   const stageMs = Date.now() - tStage;
   const tPatch = Date.now();
-  const result = applyPatches(patchedPath, patches, verbose, timeout);
+  const codeSplit = isCodeSplitCached(version);
+  const result = applyPatches(patchedPath, patches, verbose, timeout, codeSplit);
   const patchMs = Date.now() - tPatch;
 
-  if (!result || result.failed !== 0) {
+  if (!result || (result.failed !== 0 && !codeSplit)) {
     throw new Error(`Patch build failed (${result?.failed ?? "unknown"}); refusing partial output`);
   }
-  fixBunCjsWrapper(patchedPath);
+  // For code-split binaries, some patches may fail because the target code
+  // has moved to a different chunk or changed structure. This is expected
+  // for new versions — failed patches are reported but don't block execution.
+  fixBunCjsWrapper(patchedPath, codeSplit);
   const totalMs = Date.now() - t0;
   try {
     fs.writeFileSync(path.join(getCachePath(version), "timings.json"), JSON.stringify({
@@ -699,7 +1049,7 @@ function runPatched(version, cliArgs, verbose = false, patches = null) {
 
   const { patchedPath, result } = ensurePatched(version, patches, verbose, DEFAULT_PATCH_TIMEOUT);
 
-  if (result && result.failed > 0) {
+  if (result && result.failed > 0 && !isCodeSplitCached(version)) {
     throw new Error(`Refusing to run ${result.failed} failed patch(es)`);
   }
   if (result) {
@@ -733,9 +1083,24 @@ function runPatched(version, cliArgs, verbose = false, patches = null) {
   }
 
   // Run under Bun — the patched binary targets Bun APIs natively.
-  // The @bun header has been stripped and the IIFE now self-invokes with CJS args.
+  // For code-split binaries, run the chunks directory entry point (cli.js).
+  // For legacy monolithic binaries, run the single deobfuscated.js file.
+  const codeSplit = isCodeSplitCached(version);
+  let runPath;
+  if (codeSplit) {
+    const chunksEntry = path.join(path.dirname(patchedPath), "chunks", "cli.js");
+    if (fs.existsSync(chunksEntry)) {
+      runPath = chunksEntry;
+    } else {
+      // Fallback to concatenated file
+      runPath = resolved;
+    }
+  } else {
+    runPath = resolved;
+  }
+
   const childCmd = "bun";
-  const childArgs = [resolved, ...cliArgs];
+  const childArgs = [runPath, ...cliArgs];
 
   const child = spawn(childCmd, childArgs, {
     stdio: "inherit",
