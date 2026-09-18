@@ -1,15 +1,10 @@
 import { describe, it, expect } from "bun:test";
-import path from "path";
 import { transform } from "../../codemods/codemod-unlock-models.cjs";
-
-const parser = require(path.join(process.cwd(), "codemods/node_modules/@babel/parser"));
 
 const TIMEOUT = 30000;
 
 describe("codemod-unlock-models (wrapper)", () => {
-  it("chains gateway-models-unfilter then model-full-list on shared AST", () => {
-    // model-full-list requires specific AST shapes (model-capabilities wrapper)
-    // that minimal fixtures don't provide — it throws on mismatch.
+  it("throws when sub-codemods can't find their targets (regex contract)", () => {
     const code = `
       function getModelList() {
         if (process.env.CLAUDE_CODE_USE_BEDROCK) return ["bedrock-model"];
@@ -17,14 +12,19 @@ describe("codemod-unlock-models (wrapper)", () => {
         return ["claude-sonnet-4-6"];
       }
     `;
-    const ast = parser.parse(code);
-    expect(() => transform(ast, code)).toThrow();
+    // Regex contract: transform(code) — sub-codemods throw on missing anchors
+    expect(() => transform(code)).toThrow();
   });
 
-  it("throws when sub-codemods can't find their targets", () => {
+  it("throws on trivial input (regex contract)", () => {
     const code = "var x = 42;";
-    const ast = parser.parse(code);
-    expect(() => transform(ast, code)).toThrow();
+    expect(() => transform(code)).toThrow();
+  });
+
+  it("handles old Babel contract (ast, code) for backward compatibility", () => {
+    const code = "var x = 42;";
+    // Old callers pass (ast, code); wrapper extracts code from arguments
+    expect(() => transform(null, code)).toThrow();
   });
 
   it("exports transform as a function", () => {

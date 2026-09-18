@@ -4,21 +4,11 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 const MOD_ID = "add_cache_keepalive";
 const SENTINEL = "__CACHE_KEEPALIVE_INSTALLED__";
 
 // The runtime module. Plain ES (var/function), no import/export, broad compat.
-// RATIONALE: keepalive is the only lever for providers with automatic prefix
-// caching (no cache_control/TTL flag) — see memory: add-cache-keepalive-design.
-// __ckInvalidate is wired (5th injection) into the markPostCompaction body —
-// the function that sets <obj>.pendingPostCompaction = true, fired at every
-// compaction completion (/compact, auto-compact). Clearing the captured body
-// there prevents pings that warm a prefix the next turn no longer shares.
 const MODULE_SOURCE = `
 // ${SENTINEL}
 // Cache keepalive: re-POSTs the last /v1/messages request at low cost during
@@ -101,189 +91,157 @@ const MODULE_SOURCE = `
 })();
 `;
 
-// typeof NAME === "function"
-function typeofFn(name) {
-  return t.binaryExpression(
-    "===",
-    t.unaryExpression("typeof", t.identifier(name), true),
-    t.stringLiteral("function")
-  );
-}
-
-// <url>.indexOf(STR)
-function indexOfCall(urlId, str) {
-  return t.callExpression(
-    t.memberExpression(urlId, t.identifier("indexOf")),
-    [t.stringLiteral(str)]
-  );
-}
-
-// Build the CAPTURE call statement:
-//   typeof __ckCapture === "function" && typeof URL === "string"
-//   && URL.indexOf("/v1/messages") !== -1 && URL.indexOf("count_token") === -1
-//   && __ckCapture(URL, OPTS.headers, OPTS.body, <holder>.fetch)
-// The fetch holder node is the cloned <holder>.fetch member expression from the
-// matched call site (callee.object), so the captured fetchFn is exactly the
-// function being invoked — this.fetch in current upstream, but robust to a
-// future X.fetch holder. Avoids hardcoding `this` and preserves any SDK fetch
-// adapter/proxy wired onto the actual holder.
-function buildCaptureStmt(urlName, optsName, fetchHolderNode) {
-  const urlId = t.identifier(urlName);
-  const optsId = t.identifier(optsName);
-  const minus1 = t.unaryExpression("-", t.numericLiteral(1), true);
-  return t.expressionStatement(
-    t.logicalExpression("&&",
-      typeofFn("__ckCapture"),
-      t.logicalExpression("&&",
-        t.binaryExpression("===", t.unaryExpression("typeof", urlId, true), t.stringLiteral("string")),
-        t.logicalExpression("&&",
-          t.binaryExpression("!==", indexOfCall(urlId, "/v1/messages"), minus1),
-          t.logicalExpression("&&",
-            t.binaryExpression("===", indexOfCall(urlId, "count_token"), minus1),
-            t.callExpression(t.identifier("__ckCapture"), [
-              urlId,
-              t.memberExpression(optsId, t.identifier("headers")),
-              t.memberExpression(optsId, t.identifier("body")),
-              fetchHolderNode,
-            ])
-          )
-        )
-      )
-    )
-  );
-}
-
-// typeof __ckX === "function" && __ckX()
-function buildGuardedCallStmt(name) {
-  return t.expressionStatement(
-    t.logicalExpression("&&", typeofFn(name), t.callExpression(t.identifier(name), []))
-  );
-}
-
-function isId(node, name) {
-  return t.isIdentifier(node, { name });
-}
-
-// True if a FunctionDeclaration's body contains the completion-timestamp setter
-// assignment (the anchor that uniquely identifies G$_ / its equivalent).
-function hasCompletionSetter(fnDecl) {
-  const stmts = (fnDecl.body && fnDecl.body.body) || [];
-  return stmts.some(
-    (s) =>
-      t.isExpressionStatement(s) &&
-      t.isAssignmentExpression(s.expression) &&
-      t.isMemberExpression(s.expression.left) &&
-      t.isIdentifier(s.expression.left.property, { name: "lastApiCompletionTimestamp" })
-  );
-}
-
-// True if a FunctionDeclaration's body assigns `true` to a `.pendingPostCompaction`
-// property — the markPostCompaction impl, fired at every compaction completion
-// (/compact, auto-compact). Anchored on the stable property name, never the
-// minified fn name (QgH today). Used to invalidate the captured keepalive body
-// so a ping never warms a prefix the next turn no longer shares.
-function isPostCompactionMarker(fnDecl) {
-  if (!fnDecl.body || !Array.isArray(fnDecl.body.body)) return false;
-  return fnDecl.body.body.some(
-    (s) =>
-      t.isExpressionStatement(s) &&
-      t.isAssignmentExpression(s.expression) &&
-      s.expression.operator === "=" &&
-      t.isMemberExpression(s.expression.left) &&
-      t.isIdentifier(s.expression.left.property, { name: "pendingPostCompaction" }) &&
-      t.isBooleanLiteral(s.expression.right, { value: true })
-  );
-}
-
 /**
- * Apply all four injections to the shared AST. Returns the count of injected
- * sites (0 = already applied or no matches). The engine verifies via status_tests
- * before/after; this returns 0 rather than throwing so batch application degrades
- * gracefully across version drift.
+ * Five injection sites, all anchored on stable property names:
+ *
+ * SITE 1 (CAPTURE): `return await HOLDER.fetch.call(undefined, URL, OPTS)` —
+ *   insert __ckCapture guard before this return statement.
+ *   Anchors: `.fetch.call(`, `undefined` as first arg, 3+ args.
+ *
+ * SITE 2 (START): `.lastApiCompletionTimestamp =` assignment —
+ *   insert `typeof __ckStart === "function" && __ckStart()` after it.
+ *
+ * SITE 3 (STOP): `.lastMainRequestId =` assignment —
+ *   insert `typeof __ckStop === "function" && __ckStop()` after it.
+ *
+ * SITE 4 (MODULE): insert the keepalive IIFE after the function containing
+ *   the completion setter (identified by `.lastApiCompletionTimestamp` assignment).
+ *
+ * SITE 5 (INVALIDATE): `.pendingPostCompaction = true` assignment —
+ *   insert `typeof __ckInvalidate === "function" && __ckInvalidate();` before it.
  */
-function transform(ast, inputCode) {
-  // Idempotency: the sentinel string literal only exists post-patch. The engine
-  // also checks the applied status_test, but this makes standalone re-runs safe.
-  if (inputCode && inputCode.indexOf(SENTINEL) !== -1) return 0;
+function transform(code) {
+  // Idempotency: sentinel already present
+  if (code.includes(SENTINEL)) {
+    return { code, changed: 0 };
+  }
 
   let count = 0;
   let moduleInserted = false;
 
-  // Parse the module once; reused if/when we find the insertion site.
-  let moduleStmts = null;
-  function getModuleStmts() {
-    if (!moduleStmts) {
-      moduleStmts = parser.parse(MODULE_SOURCE, { sourceType: "script" }).program.body;
-    }
-    return moduleStmts;
+  // --- SITE 2: START (after .lastApiCompletionTimestamp = assignment) ---
+  const startPattern = /([\w$]+)\.lastApiCompletionTimestamp\s*=\s*([\w$]+)\s*;/g;
+  let startMatch;
+  const startSites = [];
+  while ((startMatch = startPattern.exec(code)) !== null) {
+    startSites.push({ index: startMatch.index, matchStr: startMatch[0], endIdx: startMatch.index + startMatch[0].length });
+  }
+  // We'll process these later (need to know module insertion point)
+
+  // --- SITE 3: STOP (after .lastMainRequestId = assignment) ---
+  const stopPattern = /([\w$]+)\.lastMainRequestId\s*=\s*([\w$]+)\s*;/g;
+  let stopMatch;
+  const stopSites = [];
+  while ((stopMatch = stopPattern.exec(code)) !== null) {
+    stopSites.push({ index: stopMatch.index, matchStr: stopMatch[0], endIdx: stopMatch.index + stopMatch[0].length });
   }
 
-  traverse(ast, {
-    // SITE 2 (START) + SITE 3 (STOP): setter assignments.
-    ExpressionStatement(p) {
-      const expr = p.node.expression;
-      if (!t.isAssignmentExpression(expr) || !t.isMemberExpression(expr.left)) return;
-      const prop = expr.left.property;
-      if (!t.isIdentifier(prop)) return;
+  // --- SITE 5: INVALIDATE (before .pendingPostCompaction = true) ---
+  const invalidatePattern = /([\w$]+)\.pendingPostCompaction\s*=\s*true\s*;/g;
+  let invMatch;
+  const invSites = [];
+  while ((invMatch = invalidatePattern.exec(code)) !== null) {
+    invSites.push({ index: invMatch.index, matchStr: invMatch[0] });
+  }
 
-      if (prop.name === "lastApiCompletionTimestamp") {
-        p.insertAfter(buildGuardedCallStmt("__ckStart"));
-        count++;
-      } else if (prop.name === "lastMainRequestId") {
-        p.insertAfter(buildGuardedCallStmt("__ckStop"));
-        count++;
+  // --- SITE 1: CAPTURE (before `return await HOLDER.fetch.call(undefined, URL, OPTS)`) ---
+  // Pattern: return await <holder>.fetch.call(undefined, <url>, <opts>)
+  const capturePattern = /return\s+await\s+([\w$]+(?:\.\w+)*)\.fetch\.call\(undefined,\s*([\w$]+),\s*([\w$]+)\s*\)/g;
+  let capMatch;
+  const capSites = [];
+  while ((capMatch = capturePattern.exec(code)) !== null) {
+    const holder = capMatch[1];
+    const urlName = capMatch[2];
+    const optsName = capMatch[3];
+    capSites.push({
+      index: capMatch.index,
+      matchStr: capMatch[0],
+      holder,
+      urlName,
+      optsName,
+    });
+  }
+
+  // Apply all injections. Process in reverse order by index to maintain offsets.
+  // Collect all edits as {index, type, data} and sort by index descending.
+
+  const edits = [];
+
+  // CAPTURE edits
+  for (const cap of capSites) {
+    const captureStmt = `typeof __ckCapture === "function" && typeof ${cap.urlName} === "string" && ${cap.urlName}.indexOf("/v1/messages") !== -1 && ${cap.urlName}.indexOf("count_token") === -1 && __ckCapture(${cap.urlName}, ${cap.optsName}.headers, ${cap.optsName}.body, ${cap.holder}.fetch);`;
+    edits.push({ index: cap.index, type: "insert_before", text: captureStmt + "\n" });
+  }
+
+  // START edits
+  for (const site of startSites) {
+    const startStmt = `typeof __ckStart === "function" && __ckStart();`;
+    edits.push({ index: site.endIdx, type: "insert_after", text: "\n" + startStmt });
+  }
+
+  // STOP edits
+  for (const site of stopSites) {
+    const stopStmt = `typeof __ckStop === "function" && __ckStop();`;
+    edits.push({ index: site.endIdx, type: "insert_after", text: "\n" + stopStmt });
+  }
+
+  // INVALIDATE edits
+  for (const site of invSites) {
+    const invStmt = `typeof __ckInvalidate === "function" && __ckInvalidate(); `;
+    edits.push({ index: site.index, type: "insert_before", text: invStmt });
+  }
+
+  // MODULE edit: insert after the function containing the completion setter
+  // Find the function that contains .lastApiCompletionTimestamp and insert the IIFE after it
+  if (startSites.length > 0) {
+    // Find the containing function for the first start site
+    const firstStart = startSites[0].index;
+    // Scan backward for function keyword/brace
+    let funcBraceStart = -1;
+    let depth = 0;
+    for (let i = firstStart; i >= 0; i--) {
+      if (code[i] === '}') depth++;
+      if (code[i] === '{') {
+        if (depth === 0) { funcBraceStart = i; break; }
+        depth--;
       }
-    },
-
-    // SITE 1 (CAPTURE): the SDK fetch chokepoint.
-    // Shape: return await this.fetch.call(undefined, URL, OPTS)
-    ReturnStatement(p) {
-      const aw = p.node.argument;
-      if (!t.isAwaitExpression(aw)) return;
-      const call = aw.argument;
-      if (!t.isCallExpression(call)) return;
-      const callee = call.callee;
-      if (!t.isMemberExpression(callee)) return;
-      if (!t.isMemberExpression(callee.object)) return;
-      // callee.object === <X>.fetch ; callee.property === call
-      if (!isId(callee.object.property, "fetch") || !isId(callee.property, "call")) return;
-      const args = call.arguments;
-      if (!Array.isArray(args) || args.length < 3) return;
-      const urlArg = args[1];
-      const optsArg = args[2];
-      if (!t.isIdentifier(urlArg) || !t.isIdentifier(optsArg)) return;
-
-      // callee.object is the <holder>.fetch member expression — clone it so the
-      // capture stashes exactly the fetch function being invoked (see buildCaptureStmt).
-      const fetchHolder = t.cloneNode(callee.object, true);
-      p.insertBefore(buildCaptureStmt(urlArg.name, optsArg.name, fetchHolder));
-      count++;
-    },
-
-    // SITE 4 (MODULE) + SITE 5 (INVALIDATE).
-    FunctionDeclaration(p) {
-      // MODULE: insert the keepalive IIFE once, after the completion-setter fn.
-      if (!moduleInserted && hasCompletionSetter(p.node)) {
-        const stmts = getModuleStmts();
-        for (let i = stmts.length - 1; i >= 0; i--) {
-          p.insertAfter(stmts[i]);
-        }
+    }
+    if (funcBraceStart !== -1) {
+      // Find matching closing brace
+      depth = 1;
+      let funcBraceEnd = -1;
+      for (let i = funcBraceStart + 1; i < code.length; i++) {
+        if (code[i] === '{') depth++;
+        if (code[i] === '}') { depth--; if (depth === 0) { funcBraceEnd = i; break; } }
+      }
+      if (funcBraceEnd !== -1) {
+        edits.push({ index: funcBraceEnd + 1, type: "insert_after", text: "\n" + MODULE_SOURCE + "\n" });
         moduleInserted = true;
-        count++;
       }
-      // INVALIDATE: inject __ckInvalidate() at the top of markPostCompaction's body
-      // (the pendingPostCompaction=true setter) so any compaction completion clears
-      // the captured body, preventing a ping that warms a stale prefix.
-      if (isPostCompactionMarker(p.node)) {
-        p.node.body.body.unshift(buildGuardedCallStmt("__ckInvalidate"));
-        count++;
-      }
-    },
-  });
+    }
+  }
 
-  return count;
+  // Sort edits by index descending (apply from end to start to maintain offsets)
+  edits.sort((a, b) => b.index - a.index);
+
+  // Apply edits
+  for (const edit of edits) {
+    if (edit.type === "insert_before") {
+      code = code.substring(0, edit.index) + edit.text + code.substring(edit.index);
+    } else if (edit.type === "insert_after") {
+      code = code.substring(0, edit.index) + edit.text + code.substring(edit.index);
+    }
+    count++;
+  }
+
+  if (count === 0) {
+    return { code, changed: 0 };
+  }
+
+  return { code, changed: count };
 }
 
+/** CLI wrapper */
 function main() {
   const [, , inputFile, outputFile] = process.argv;
   if (!inputFile) {
@@ -294,23 +252,16 @@ function main() {
   const inputPath = path.resolve(inputFile);
   const code = fs.readFileSync(inputPath, "utf8");
 
-  const ast = parser.parse(code, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
+  const { code: output, changed } = transform(code);
 
-  const changedCount = transform(ast, code);
-
-  if (changedCount === 0) {
+  if (changed === 0) {
     console.error(
       "add_cache_keepalive: no matching sites found (already patched or version drift)."
     );
     process.exit(1);
   }
 
-  console.error(`add_cache_keepalive: injected ${changedCount} site(s).`);
-
-  const output = generate(ast, { retainLines: false }, code).code;
+  console.error(`add_cache_keepalive: injected ${changed} site(s).`);
 
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");

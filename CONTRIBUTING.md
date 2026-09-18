@@ -30,12 +30,43 @@ The scaffold creates a YAML definition in `patches/`, a transform in `codemods/`
 
 Requirements:
 
-- Prefer Babel AST matching. Anchor on stable properties, strings, and structure—not minified variable names.
+- Choose the right engine (see **Engine selection** below).
 - Keep original behavior when the mod is disabled. Guard calls to injected helpers with `typeof __isModEnabled__ === "function"`.
 - Make transforms idempotent and report whether they changed the input.
 - An `applied` status test must fail on the synthetic unpatched input and pass on the transformed output. Verify every injection when a transform changes several sites.
 - Regex transforms must not match function bodies with `[^]*` or `[\s\S]*?`; use bounded structural traversal. Use function replacers for replacement text containing `$`.
 - Test enabled and disabled behavior, near-miss inputs, structural variation, and interaction with the full batch. Syntax validity alone does not establish semantic correctness.
+
+### Engine selection
+
+The engine parses the full bundle once and applies all Babel transforms on the shared AST, generates once, then applies regex transforms sequentially on the resulting string. Babel parsing + generation of the ~25 MB deobfuscated bundle costs ~72 seconds; each regex transform costs ~10 ms. Choose regex unless the transform needs something only Babel provides.
+
+**Use regex when** (the common case — 18 of 22 codemods):
+
+- The transform anchors on a **stable string literal** (env var name, property name like `readFileState`, string value like `"API Usage Billing"`) and discovers minified names from nearby context. Regex does this equally well: find the anchor, extract the minified name with a capture group, substitute back.
+- The transform injects or wraps a **contiguous code region** — a guard before an if-statement, a variable declaration after another, a ternary wrapping a condition. Regex with `code.substring()` and offset arithmetic handles this directly.
+- The transform needs **function-level scope** (not variable binding). A brace-depth scan (walk back to the nearest `{` preceded by `function` or `=>`, forward to its matching `}`) is equivalent to `fnPath.node.body` for containment checks.
+- The transform discovers names by **structural pattern** (a call signature, an assignment shape, a return-value form) rather than by resolving references across scopes.
+
+**Use Babel when** (4 remaining codemods):
+
+- The transform resolves **cross-scope references** — e.g., following a variable binding to its declaration across nested blocks, or checking whether an identifier refers to a specific import. `getBinding()` / `scope.hasBinding()` have no regex equivalent.
+- The transform performs **multi-pass discovery with inter-transform ordering** where a later transform's target is the *mutation* of an earlier transform on the same AST node. Babel's in-place mutation makes this natural; regex would require fragile string-state tracking between phases.
+- The transform injects **large, nested AST subtrees** (entire React component trees with JSX, deeply nested conditionals) that would require constructing the entire output as a string literal — error-prone and hard to maintain versus Babel's `t.*` builders.
+- The transform needs **semantic type information** (`isIdentifier`, `isConditionalExpression`, etc.) to discriminate between nodes that have identical surface syntax but different AST roles (e.g., a property name vs. a variable name that happen to use the same identifier).
+
+**Decision tree:**
+
+1. Does the transform resolve variable bindings across scopes? → **Babel**
+2. Does the transform inject more than ~30 lines of structured code (components, nested conditionals) in a single insertion? → **Babel** (unless the injection is a self-contained string literal you can inject wholesale)
+3. Does the transform need to understand node types beyond what a string pattern captures? → **Babel**
+4. Does the transform have multiple phases that mutate the same node, with later phases depending on earlier mutations? → **Babel**
+5. Otherwise — anchor on a stable string, discover minified names from context, splice the output — → **Regex**
+
+**Mixed-engine wrappers** are legitimate: a wrapper codemod (e.g., `display_model_name`) can chain regex sub-codemods via string passing and Babel sub-codemods via parse→transform→generate. The wrapper exposes the regex contract (`transform(code) → { code, changed }`) regardless of internal engine choice. Set `engine: "regex"` in the YAML so the engine treats it as a regex codemod; the wrapper handles its own Babel internally.
+
+**Regex contract:** `transform(code: string) → { code: string, changed: number }`
+**Babel contract:** `transform(ast, code: string) → number | { changed: number }`
 
 Before submitting a runtime change, run the source checks above and the local macOS release check:
 

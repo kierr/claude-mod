@@ -92,7 +92,7 @@ describe("codemod-plan-exit-show-model", () => {
       expect(output).toContain("ABC()");
     });
 
-    it("throws when model hook is not found", { timeout: TIMEOUT }, () => {
+    it("returns changed: 0 when model hook is not found", { timeout: TIMEOUT }, () => {
       const input = `
         function noHookHere() {
           return 42;
@@ -102,9 +102,9 @@ describe("codemod-plan-exit-show-model", () => {
         }
       `;
 
-      expect(() => runCodemod(input)).toThrow(
-        /Could not find model display hook/
-      );
+      const output = runCodemod(input);
+      // Output is unchanged — no hook was found so no transformation applied
+      expect(output).toBe(input);
     });
   });
 
@@ -305,8 +305,9 @@ describe("codemod-plan-exit-show-model", () => {
         console.log(x);
       `;
 
-      // Should throw because model hook is not found
-      expect(() => runCodemod(input)).toThrow();
+      // Should return unchanged because model hook is not found
+      const output = runCodemod(input);
+      expect(output).toBe(input);
     });
 
     it("does not match hook with only mainLoopModel (missing mainLoopModelForSession)", { timeout: TIMEOUT }, () => {
@@ -320,10 +321,9 @@ describe("codemod-plan-exit-show-model", () => {
         }
       `;
 
-      // Should throw because hook is incomplete
-      expect(() => runCodemod(input)).toThrow(
-        /Could not find model display hook/
-      );
+      // Should return unchanged because hook is incomplete
+      const output = runCodemod(input);
+      expect(output).toBe(input);
     });
   });
 });

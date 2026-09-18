@@ -8,7 +8,7 @@ status_tests:
   applied: 'function __getModConfig__\(id'
 codemod:
   type: "node_script"
-  engine: "babel"
+  engine: "regex"
   script: "codemods/codemod-inject-mods-runtime.cjs"
 
 mod:

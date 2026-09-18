@@ -18,7 +18,9 @@ describe("Smoke: cached patched CLI (absent cache is an explicit skip)", () => {
   }, 35000);
 
   smoke("the actual cached CLI boots offline and reports the expected version", () => {
-    const result = spawnSync("bun", [patchedPath, "--version"], { timeout: 15000, encoding: "utf8" });
+    // Use node, not bun — the deobfuscated CLI contains Unicode (e.g. ±) that
+    // Bun's parser rejects but Node handles fine.
+    const result = spawnSync("node", [patchedPath, "--version"], { timeout: 15000, encoding: "utf8" });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
     expect(result.stdout.trim().split(/\s+/)).toContain(version);

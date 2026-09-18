@@ -2,10 +2,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 const TITLE_REPLACEMENTS = {
   "Plan Mode": "Plan",
@@ -18,102 +14,85 @@ const TITLE_REPLACEMENTS = {
 const MOD_ID = "display_short_mode_labels";
 
 /**
- * Check if a node is an ObjectProperty with key "title" (Identifier) and
- * a StringLiteral value matching one of the known mode title strings.
+ * Two passes:
+ * 1. Shorten mode title strings: replace `title: "Plan Mode"` with
+ *    `title: __isModEnabled__(...) ? "Plan" : "Plan Mode"`
+ * 2. Guard " on" string in createElement calls: replace `" on"` with
+ *    `__isModEnabled__(...) ? "" : " on"` and null the chord-hint arg.
  */
-function isModeTitleProp(node) {
-  return (
-    t.isObjectProperty(node) &&
-    !node.computed &&
-    t.isIdentifier(node.key, { name: "title" }) &&
-    t.isStringLiteral(node.value) &&
-    node.value.value in TITLE_REPLACEMENTS
-  );
-}
+function transform(code) {
+  // Idempotency: already patched
+  if (code.includes(`__isModEnabled__("${MOD_ID}")`)) {
+    return { code, changed: 0 };
+  }
 
-/**
- * Main transform.
- *
- * @param {object} ast - Babel AST
- * @returns {number} Number of changes applied
- */
-function transform(ast) {
-  let titleChanges = 0;
-  let hintRemovals = 0;
+  const modGuard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")`;
+  let count = 0;
 
-  // Pass 1: Shorten mode title strings with __isModEnabled__ guard
-  traverse(ast, {
-    ObjectProperty(propPath) {
-      if (isModeTitleProp(propPath.node)) {
-        const oldVal = propPath.node.value.value;
-        // Guarded: use short label when mod enabled, original when disabled
-        propPath.node.value = t.conditionalExpression(
-          t.logicalExpression(
-            "&&",
-            t.binaryExpression("===", t.unaryExpression("typeof", t.identifier("__isModEnabled__")), t.stringLiteral("function")),
-            t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(MOD_ID)])
-          ),
-          t.stringLiteral(TITLE_REPLACEMENTS[oldVal]),
-          t.stringLiteral(oldVal)
-        );
-        titleChanges += 1;
-      }
-    },
-  });
+  // Pass 1: Shorten mode titles
+  for (const [original, shortened] of Object.entries(TITLE_REPLACEMENTS)) {
+    // Match: title: "Plan Mode" (in object literal)
+    const pattern = new RegExp(`(title:\\s*)"${original.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`, "g");
+    const replacement = `$1${modGuard} ? "${shortened}" : "${original}"`;
+    const newCode = code.replace(pattern, replacement);
+    if (newCode !== code) {
+      // Count how many replacements were made
+      const origMatches = code.match(pattern);
+      count += origMatches ? origMatches.length : 0;
+      code = newCode;
+    }
+  }
 
-  // Pass 2: Guard " on" string literal with mod check.
-  // When mod enabled, replace " on" with empty string (hides hint suffix).
-  // When mod disabled, keep " on" unchanged.
-  traverse(ast, {
-    StringLiteral(litPath) {
-      if (litPath.node.value !== " on") return;
+  // Pass 2: Guard " on" in createElement calls
+  // Pattern: createElement(... , " on", <chord-hint-arg>)
+  // The " on" appears as a string literal argument to createElement.
+  // We need to find it and replace with a ternary.
+  const onPattern = /createElement\s*\([^)]*\)\s*[^;]*" on"/g;
+  // More targeted: find " on" that appears after .toLowerCase() in a createElement context
+  const targetedPattern = /(\.toLowerCase\(\)\s*,\s*)" on"(\s*,\s*([\w$]+))/g;
 
-      const callPath = litPath.parentPath;
-      if (!callPath.isCallExpression()) return;
+  let match;
+  while ((match = targetedPattern.exec(code)) !== null) {
+    const before = match[1];      // .toLowerCase(), 
+    const afterAndArg = match[2]; // , chordArg
+    const chordArg = match[3];    // the chord-hint variable
 
-      // Verify parent is a createElement call (ink createElement or similar).
-      const callee = callPath.node.callee;
-      const isCreateElement =
-        (t.isIdentifier(callee) && callee.name === "createElement") ||
-        (t.isMemberExpression(callee) && t.isIdentifier(callee.property, { name: "createElement" }));
-      if (!isCreateElement) return;
+    const origSegment = match[0];
+    const newSegment = `${before}${modGuard} ? "" : " on"${afterAndArg.replace(chordArg, `${modGuard} ? null : ${chordArg}`)}`;
 
-      const args = callPath.node.arguments;
-      const idx = args.indexOf(litPath.node);
-      if (idx === -1) return;
+    code = code.substring(0, match.index) + newSegment + code.substring(match.index + origSegment.length);
+    count += 2; // " on" replacement + chord hint nulling
+    // Reset regex since we mutated the string
+    targetedPattern.lastIndex = 0;
+  }
 
-      // Replace " on" with guarded version: mod enabled → "" (empty), disabled → " on"
-      args[idx] = t.conditionalExpression(
-        t.logicalExpression(
-          "&&",
-          t.binaryExpression("===", t.unaryExpression("typeof", t.identifier("__isModEnabled__")), t.stringLiteral("function")),
-          t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(MOD_ID)])
-        ),
-        t.stringLiteral(""),
-        t.stringLiteral(" on")
-      );
-      hintRemovals += 1;
+  // Also handle " on" in simpler createElement patterns without .toLowerCase()
+  // but still inside createElement() calls
+  const simpleOnPattern = /(createElement\s*\([^)]*,\s*)" on"(\s*,\s*[\w$]+)/g;
+  while ((match = simpleOnPattern.exec(code)) !== null) {
+    // Skip if already handled by the targeted pattern (has __isModEnabled__)
+    if (code.substring(match.index - 50, match.index).includes("__isModEnabled__")) continue;
 
-      // Also guard the next argument (chord hint) — null it out when mod enabled
-      if (idx + 1 < args.length) {
-        const nextArg = args[idx + 1];
-        args[idx + 1] = t.conditionalExpression(
-          t.logicalExpression(
-            "&&",
-            t.binaryExpression("===", t.unaryExpression("typeof", t.identifier("__isModEnabled__")), t.stringLiteral("function")),
-            t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(MOD_ID)])
-          ),
-          t.nullLiteral(),
-          nextArg
-        );
-        hintRemovals += 1;
-      }
-    },
-  });
+    const before = match[1];
+    const afterAndArg = match[2];
+    const chordArg = afterAndArg.match(/,\s*([\w$]+)/)?.[1];
 
-  // Idempotent: if all titles are already shortened and all " on" removed,
-  // this is a no-op, not an error. The engine's status_tests handle detection.
-  return titleChanges + hintRemovals;
+    const origSegment = match[0];
+    let newSegment = `${before}${modGuard} ? "" : " on"${afterAndArg}`;
+    if (chordArg) {
+      newSegment = `${before}${modGuard} ? "" : " on"${afterAndArg.replace(chordArg, `${modGuard} ? null : ${chordArg}`)}`;
+      count += 2;
+    } else {
+      count += 1;
+    }
+
+    code = code.substring(0, match.index) + newSegment + code.substring(match.index + origSegment.length);
+    simpleOnPattern.lastIndex = 0;
+  }
+
+  if (count === 0) return { code, changed: 0 };
+
+  return { code, changed: count };
 }
 
 /** CLI wrapper */
@@ -127,15 +106,8 @@ function main() {
   const inputPath = path.resolve(inputFile);
   const code = fs.readFileSync(inputPath, "utf8");
 
-  const ast = parser.parse(code, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
-
-  const count = transform(ast);
-  console.error(`Shortened ${count} mode label(s).`);
-
-  const output = generate(ast, { retainLines: false }, code).code;
+  const { code: output, changed } = transform(code);
+  console.error(`Shortened ${changed} mode label(s).`);
 
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");

@@ -4,13 +4,10 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 // The runtime helper to inject. Uses var (not const/let) for broad compat.
 // 2-second TTL cache keeps toggles responsive without excessive file reads.
+// __REQUIRE_FN__ is replaced with the discovered require function name.
 const HELPER_CODE = `
 var __mods_cache__ = null;
 var __mods_cache_time__ = 0;
@@ -49,86 +46,44 @@ function __getModConfig__(id, key, fallback) {
 `;
 
 /**
- * Inject into the CommonJS wrapper body, where require is available as a parameter.
+ * Find the CJS wrapper's opening brace and inject the runtime helpers
+ * at position 0 inside it. The CJS wrapper is identified by the pattern:
+ *   (function(exports, require, module, __filename, __dirname) {
+ *
+ * Discovers whether the require parameter is called "require" or something
+ * else (minified), and substitutes __REQUIRE_FN__ accordingly.
  */
-function getInjectionTarget(ast) {
-  // CJS wrapper — (function(exports, require, module, __filename, __dirname) { ... })
-  // Handles: bare FunctionExpression, IIFE CallExpression, unary-wrapped IIFEs.
-  // Tolerates leading Directive nodes (e.g. "use strict").
-  const firstExpr = ast.program.body.find(n =>
-    t.isExpressionStatement(n) && !t.isDirective(n)
-  );
-  if (firstExpr) {
-    let fnExpr = firstExpr.expression;
-    // Unwrap: CallExpression.arguments[0] (IIFE), UnaryExpression.argument
-    for (let i = 0; i < 3 && fnExpr && !t.isFunctionExpression(fnExpr); i++) {
-      if (t.isCallExpression(fnExpr) && fnExpr.arguments.length > 0) {
-        fnExpr = fnExpr.arguments[0];
-      } else if (t.isUnaryExpression(fnExpr)) {
-        fnExpr = fnExpr.argument;
-      } else {
-        break;
-      }
-    }
-    if (t.isFunctionExpression(fnExpr)) {
-      const hasRequireParam = fnExpr.params.some(param =>
-        t.isIdentifier(param, { name: "require" })
-      );
-      if (hasRequireParam) {
-        return { body: fnExpr.body.body, requireFnName: "require", insertIndex: 0 };
-      }
-    }
+function transform(code) {
+  // Idempotency: if __modsLoad__ already exists, skip
+  if (code.includes("function __modsLoad__()")) {
+    return { code, changed: 0 };
   }
 
-  return null;
-}
+  // Find CJS wrapper: (function(exports, require, module, __filename, __dirname) {
+  // The require parameter name may be minified, so we match structurally.
+  const wrapperPattern = /\(function\s*\(\s*exports\s*,\s*([\w$]+)\s*,\s*module\s*,\s*__filename\s*,\s*__dirname\s*\)\s*\{/;
+  const match = code.match(wrapperPattern);
 
-// Return codes for transform():
-//   1  = injection performed
-//   0  = idempotent skip (helpers already present)
-//   -1 = no injection target found (bundle shape unsupported)
-const RC_INJECTED = 1;
-const RC_ALREADY_PRESENT = 0;
-const RC_NO_TARGET = -1;
-
-function transform(ast) {
-  // Idempotency: if __modsLoad__ already exists, skip injection
-  let alreadyPresent = false;
-  traverse(ast, {
-    FunctionDeclaration(fnPath) {
-      if (t.isIdentifier(fnPath.node.id, { name: "__modsLoad__" })) {
-        alreadyPresent = true;
-      }
-    },
-  });
-  if (alreadyPresent) return RC_ALREADY_PRESENT;
-
-  const target = getInjectionTarget(ast);
-  if (!target) {
-    // No injection target found — no CJS wrapper parameter.
-    // Return a distinct code so callers can distinguish "already present" from
-    // "unsupported bundle shape" while still allowing the patch engine to continue.
+  if (!match) {
     console.error("Warning: could not find injection target (no CJS wrapper); skipping mods runtime injection.");
-    return RC_NO_TARGET;
+    return { code, changed: 0 };
   }
 
-  // Substitute __REQUIRE_FN__ with the discovered require function variable
-  const resolvedHelper = HELPER_CODE.replace(/__REQUIRE_FN__/g, target.requireFnName);
+  const requireFnName = match[1];
+  const resolvedHelper = HELPER_CODE.replace(/__REQUIRE_FN__/g, requireFnName);
 
-  // Parse the helper code into statements
-  const helperAst = parser.parse(resolvedHelper, {
-    sourceType: "script",
-  });
+  // Find the opening brace position of the CJS wrapper body
+  const bracePos = code.indexOf("{", match.index);
+  if (bracePos === -1) return { code, changed: 0 };
 
-  // Insert each statement at the correct position
-  const helperStmts = helperAst.program.body;
-  for (let i = helperStmts.length - 1; i >= 0; i--) {
-    target.body.splice(target.insertIndex, 0, helperStmts[i]);
-  }
+  // Insert after the opening brace
+  const insertPos = bracePos + 1;
+  code = code.substring(0, insertPos) + resolvedHelper + code.substring(insertPos);
 
-  return RC_INJECTED;
+  return { code, changed: 1 };
 }
 
+/** CLI wrapper */
 function main() {
   const [, , inputFile, outputFile] = process.argv;
   if (!inputFile) {
@@ -139,23 +94,15 @@ function main() {
   const inputPath = path.resolve(inputFile);
   const code = fs.readFileSync(inputPath, "utf8");
 
-  const ast = parser.parse(code, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
+  const { code: output, changed } = transform(code);
 
-  const changedCount = transform(ast);
-
-  if (changedCount === RC_ALREADY_PRESENT) {
+  if (changed === 0 && !code.includes("function __modsLoad__()")) {
+    console.error("Warning: could not find injection target (no CJS wrapper); skipping mods runtime injection.");
+  } else if (changed === 0) {
     console.error("Mods runtime helpers already present; skipping injection.");
-  } else if (changedCount === RC_NO_TARGET) {
-    // Warning already emitted by transform() — don't duplicate here.
-    // Fall through to generate/write so the file is still produced.
   } else {
     console.error("Injected __isModEnabled__() and __getModConfig__() runtime helpers.");
   }
-
-  const output = generate(ast, { retainLines: false }, code).code;
 
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");

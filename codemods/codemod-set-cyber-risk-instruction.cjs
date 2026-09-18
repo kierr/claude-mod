@@ -2,88 +2,44 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 const MOD_ID = "set_cyber_risk_instruction";
 const SECURITY_INSTRUCTION_PREFIX = "IMPORTANT: Assist with authorized security testing";
 
 /**
- * Check if a StringLiteral is the security instruction (starts with the prefix).
+ * Find `var IDENT = "IMPORTANT: Assist with authorized security testing...";`
+ * and replace the initializer with a __getModConfig__ ?? original fallback.
+ *
+ * Anchors on the stable security-instruction prefix string.
+ * The var name and the full string content are discovered, not hardcoded.
  */
-function isSecurityInstruction(node) {
-  if (!t.isStringLiteral(node)) return false;
-  return node.value.startsWith(SECURITY_INSTRUCTION_PREFIX);
-}
+function transform(code) {
+  // Idempotency: already transformed — no var with a raw security string remains.
+  if (code.includes('__getModConfig__("set_cyber_risk_instruction"')) {
+    return { code, changed: 0 };
+  }
 
-/**
- * Build the typeof guard for __isModEnabled__.
- * Pattern: typeof __isModEnabled__ === "function" && __isModEnabled__("set_cyber_risk_instruction")
- */
-function buildModGuard() {
-  return t.logicalExpression(
-    "&&",
-    t.binaryExpression(
-      "===",
-      t.unaryExpression("typeof", t.identifier("__isModEnabled__")),
-      t.stringLiteral("function")
-    ),
-    t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(MOD_ID)])
+  // Match: var <ident> = "IMPORTANT: Assist with authorized security testing...";
+  // Only var (not let/const), only string literals starting with the prefix.
+  const pattern = new RegExp(
+    `var\\s+([\\w$]+)\\s*=\\s*"(${SECURITY_INSTRUCTION_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^"]*)"\\s*;`
   );
-}
 
-/**
- * Build the env var fallback expression.
- * Pattern: process.env.CLAUDE_CYBER_RISK_INSTRUCTION || ORIGINAL_STRING
- */
-function buildEnvFallback(originalString) {
-  return t.logicalExpression(
-    "||",
-    t.memberExpression(
-      t.memberExpression(t.identifier("process"), t.identifier("env")),
-      t.identifier("CLAUDE_CYBER_RISK_INSTRUCTION"),
-      false // computed=false generates process.env.CLAUDE_CYBER_RISK_INSTRUCTION (dot notation)
-    ),
-    t.stringLiteral(originalString)
-  );
-}
+  const match = code.match(pattern);
+  if (!match) {
+    throw new Error("No matching security instruction string found; nothing changed.");
+  }
 
-/**
- * Main transform: find VariableDeclarator with security instruction string
- * and wrap the initializer in a mod guard conditional.
- */
-function transform(ast) {
-  let wrapped = 0;
+  const fullMatch = match[0];
+  const originalString = match[2];
 
-  traverse(ast, {
-    VariableDeclarator(declaratorPath) {
-      const { node, parent } = declaratorPath;
+  const replacement = `var ${match[1]} = __getModConfig__("${MOD_ID}", "instruction") ?? "${originalString}";`;
 
-      // Only match var declarations (not let/const)
-      if (!t.isVariableDeclaration(parent, { kind: "var" })) return;
-
-      // Check if init is the security instruction string
-      if (!isSecurityInstruction(node.init)) return;
-
-      // Found: var JiK = "IMPORTANT: Assist with authorized security testing...";
-      // Replace init with: __getModConfig__("set_cyber_risk_instruction","instruction") ?? original
-      // Disabled -> undefined ?? original -> original; enabled+set -> value; enabled+"" -> "" (CLEAR).
-      const originalString = node.init.value;
-      node.init = t.logicalExpression("??",
-        t.callExpression(t.identifier("__getModConfig__"), [t.stringLiteral(MOD_ID), t.stringLiteral("instruction")]),
-        t.stringLiteral(originalString));
-
-      wrapped += 1;
-    },
-  });
-
-  return wrapped;
+  code = code.replace(fullMatch, replacement);
+  return { code, changed: 1 };
 }
 
 /** CLI wrapper */
-
 function main() {
   const [, , inputFile, outputFile] = process.argv;
   if (!inputFile) {
@@ -94,20 +50,11 @@ function main() {
   const inputPath = path.resolve(inputFile);
   const code = fs.readFileSync(inputPath, "utf8");
 
-  const ast = parser.parse(code, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
-
-  const wrappedCount = transform(ast);
-
-  if (wrappedCount === 0) {
+  const { code: output, changed } = transform(code);
+  if (changed === 0) {
     throw new Error("No matching security instruction string found; nothing changed.");
-  } else {
-    console.error(`Wrapped ${wrappedCount} security instruction variable(s) with __isModEnabled__ guard.`);
   }
-
-  const output = generate(ast, { retainLines: false }, code).code;
+  console.error(`Wrapped ${changed} security instruction variable(s) with __getModConfig__ guard.`);
 
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");

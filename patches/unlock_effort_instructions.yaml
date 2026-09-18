@@ -11,7 +11,7 @@ status_tests:
   applicable: 'ultrathink_effort'
 codemod:
   type: "node_script"
-  engine: "babel"
+  engine: "regex"
   script: "codemods/codemod-unlock-effort-instructions.cjs"
 
 

@@ -323,9 +323,10 @@ describe("codemod-unlock-advisor", () => {
   });
 
   it("generated code parses as valid JS", () => {
-    const { parse } = require("@babel/parser");
     const { code } = transform(buildAll());
-    expect(() => parse(code, { sourceType: "script" })).not.toThrow();
+    // Syntax validity — acorn is lighter than @babel/parser but not a dep;
+    // Function() constructor catches syntax errors in script-mode code.
+    expect(() => new Function(code)).not.toThrow();
   });
 
   it("matches the applied status_test regex when all four markers present", () => {

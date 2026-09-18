@@ -3,119 +3,82 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 const MOD_ID = "fix_file_cache";
 
 /**
- * Check if a CallExpression is f(X.readFileState) — any function name — and
- * return the object identifier name (e.g. "K" or "_") or null.
+ * Find patterns like:
+ *   let v = ANYFUNC(X.readFileState);
+ *   X.readFileState.clear();
+ *   X.loadedNestedMemoryPaths?.clear();
  *
- * The callee name (sm1, ZB1, etc.) is a minifier artifact and changes every
- * release. We match on structure: single-arg call where the arg is
- * X.readFileState (a MemberExpression with property "readFileState").
+ * And wrap the clear() + optional loadedNestedMemoryPaths?.clear() in a mod guard:
+ *   if (!(typeof __isModEnabled__ === "function" && __isModEnabled__("fix_file_cache"))) {
+ *     X.readFileState.clear();
+ *     X.loadedNestedMemoryPaths?.clear();
+ *   }
+ *
+ * Anchors on the stable property name "readFileState" — discovers the object
+ * identifier (X) and the callee name (ANYFUNC) from context.
  */
-function extractReadFileStateSnapshot(node) {
-  if (!t.isCallExpression(node)) return null;
-  // Match any function call with a single argument that is X.readFileState
-  // (callee name is a minifier artifact — not semantically meaningful)
-  if (node.arguments.length !== 1) return null;
-
-  const arg = node.arguments[0];
-  if (
-    !t.isMemberExpression(arg) ||
-    arg.computed ||
-    !t.isIdentifier(arg.property, { name: "readFileState" })
-  ) {
-    return null;
+function transform(code) {
+  // Idempotency
+  if (code.includes(`__isModEnabled__("${MOD_ID}")`)) {
+    return { code, changed: 0 };
   }
 
-  return t.isIdentifier(arg.object) ? arg.object.name : null;
-}
+  const modGuard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")`;
 
-/**
- * Check if a node is `X.readFileState.clear()` with matching object identifier.
- */
-function isReadFileStateClear(node, objectName) {
-  if (!t.isExpressionStatement(node)) return false;
+  // Match: let/const/var v = ANYFUNC(X.readFileState);
+  // X is the object identifier we need to discover
+  const snapshotPattern = /(?:let|const|var)\s+([\w$]+)\s*=\s*([\w$]+)\(([\w$]+)\.readFileState\)\s*;/g;
 
-  const expr = node.expression;
-  if (!t.isCallExpression(expr)) return false;
+  let match;
+  let count = 0;
+  // Collect all matches first to avoid mutating while iterating
+  const replacements = [];
 
-  const callee = expr.callee;
-  if (
-    !t.isMemberExpression(callee) ||
-    callee.computed ||
-    !t.isIdentifier(callee.property, { name: "clear" })
-  ) {
-    return false;
+  while ((match = snapshotPattern.exec(code)) !== null) {
+    const objectName = match[3];
+
+    // Now find the next line(s): X.readFileState.clear(); and optionally X.loadedNestedMemoryPaths?.clear();
+    const afterSnapshot = match.index + match[0].length;
+
+    // Build the expected clear() pattern
+    const clearPattern = new RegExp(
+      `(${objectName}\\.readFileState\\.clear\\(\\)\\s*;\\s*(?:${objectName}\\.loadedNestedMemoryPaths\\?\\.clear\\(\\)\\s*;\\s*)?)`
+    );
+
+    const clearMatch = code.substring(afterSnapshot).match(clearPattern);
+    if (!clearMatch) continue;
+
+    const clearStart = afterSnapshot + clearMatch.index;
+    const clearEnd = clearStart + clearMatch[0].length;
+
+    // Don't wrap if it's inside a finally block (preserve finally clears)
+    // Check if there's a "finally" keyword between the last try and this point
+    const precedingCode = code.substring(0, clearStart);
+    const lastFinally = precedingCode.lastIndexOf("finally");
+    const lastTry = precedingCode.lastIndexOf("try");
+    if (lastFinally > lastTry && lastFinally > match.index) continue;
+
+    replacements.push({ clearStart, clearEnd, clearCode: clearMatch[0], objectName });
   }
 
-  const obj = callee.object;
-  if (
-    !t.isMemberExpression(obj) ||
-    obj.computed ||
-    !t.isIdentifier(obj.property, { name: "readFileState" })
-  ) {
-    return false;
+  // Apply replacements in reverse order to maintain offsets
+  for (let i = replacements.length - 1; i >= 0; i--) {
+    const r = replacements[i];
+    const guarded = `if (!(${modGuard})) {\n    ${r.clearCode.trimEnd()}\n  }`;
+    code = code.substring(0, r.clearStart) + guarded + code.substring(r.clearEnd);
+    count++;
   }
 
-  return t.isIdentifier(obj.object, { name: objectName });
-}
+  if (count === 0) return { code, changed: 0 };
 
-/**
- * Main transform: find VariableDeclarations initialized with f(X.readFileState)
- * (any callee name), then wrap the next sibling X.readFileState.clear() in a mod guard.
- */
-function transform(ast) {
-  let wrapped = 0;
-
-  traverse(ast, {
-    VariableDeclaration(varPath) {
-      for (const decl of varPath.node.declarations) {
-        const objectName = extractReadFileStateSnapshot(decl.init);
-        if (objectName === null) continue;
-
-        // Found: let v = f(X.readFileState);
-        // Check next sibling statement
-        const nextSibling = varPath.getNextSibling();
-        if (!nextSibling.node) continue;
-
-        if (isReadFileStateClear(nextSibling.node, objectName)) {
-          // Replace the ExpressionStatement with:
-          // if (!(typeof __isModEnabled__ === "function" && __isModEnabled__("fix_file_cache"))) { ... }
-          // The typeof guard prevents ReferenceError if mods_runtime wasn't applied first.
-          const isEnabled = t.logicalExpression(
-            "&&",
-            t.binaryExpression(
-              "===",
-              t.unaryExpression("typeof", t.identifier("__isModEnabled__")),
-              t.stringLiteral("function")
-            ),
-            t.callExpression(
-              t.identifier("__isModEnabled__"),
-              [t.stringLiteral(MOD_ID)]
-            )
-          );
-          const guard = t.ifStatement(
-            t.unaryExpression("!", isEnabled),
-            t.blockStatement([nextSibling.node])
-          );
-          nextSibling.replaceWith(guard);
-          wrapped += 1;
-        }
-      }
-    },
-  });
-
-  return wrapped;
+  return { code, changed: count };
 }
 
 /** CLI wrapper */
-
 function main() {
   const [, , inputFile, outputFile] = process.argv;
   if (!inputFile) {
@@ -126,20 +89,13 @@ function main() {
   const inputPath = path.resolve(inputFile);
   const code = fs.readFileSync(inputPath, "utf8");
 
-  const ast = parser.parse(code, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
+  const { code: output, changed } = transform(code);
 
-  const wrappedCount = transform(ast);
-
-  if (wrappedCount === 0) {
+  if (changed === 0) {
     console.error("No matching readFileState.clear() compaction calls found; nothing changed.");
   } else {
-    console.error(`Wrapped ${wrappedCount} readFileState.clear() call(s) with __isModEnabled__ guard.`);
+    console.error(`Wrapped ${changed} readFileState.clear() call(s) with __isModEnabled__ guard.`);
   }
-
-  const output = generate(ast, { retainLines: false }, code).code;
 
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");

@@ -2,7 +2,7 @@
 
 Since mid-2025, I have used this project to heavily modify, patch, and extend Claude Code in a number of ways. In late 2026 I have for the most part moved on, to a heavily customized `pi`, but I wanted to still open source this project for others who might have use in it.
 
-The projects goal is to smooth out the friction around typical patching, and provide a full TUI UX for enabling, disalbing, and toggling them. I call it "un-nerfing" - Anthropic has historically restricted lots of things to specific models (like opus only) or disabled them when using a 3PP. In other cases, features are gated, entirely hard-coded off, or added and then removed silently.
+claude-mod downloads an official Claude Code package, transforms it on your machine, and runs the result with Bun. The repository distributes the patching tool—not Claude Code or a prepatched binary. The project's goal is to smooth out the friction around typical patching, and provide a full TUI UX for enabling, disabling, and toggling them. I call it "un-nerfing" — Anthropic has historically restricted lots of things to specific models (like opus only) or disabled them when using a 3PP. In other cases, features are gated, entirely hard-coded off, or added and then removed silently.
 
 These mods are focused on re-enabling these things, for 3PP and non-Anthropic models. There are also tweaks and toggles exposed to configure things that are otherwise unconfigurable.
 

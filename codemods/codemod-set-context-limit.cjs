@@ -3,253 +3,158 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
+
+const MOD_ID = "set_context_limit";
 
 /**
- * Build the replacement init: __getModConfig__("set_context_limit", key) ?? defaultValue.
- * Disabled -> undefined ?? defaultValue -> defaultValue (original); enabled+set -> value;
- * enabled+absent -> defaultValue (RESET). mods.json stores real numbers, so no parseInt.
+ * Find three clusters of `var X = 200000;` by their neighboring var declarations
+ * (within the same brace-delimited block), and replace each with
+ * __getModConfig__("set_context_limit", key) ?? 200000.
+ *
+ * Also finds a hardcoded > 200000 comparison in a function containing .findLast
+ * and "assistant", replacing 200000 with the context-window variable reference.
+ *
+ * Clusters (identified by neighboring numeric constants in same block scope):
+ * - context_limit: 200000 with neighbors [20000, 32000]
+ * - tool_batch_limit: 200000 with neighbors [400000, 50]
+ * - memory_chunk_limit: 200000 with neighbors [250000, 3]
  */
-function buildCfg(key, defaultValue) {
-  return t.logicalExpression("??",
-    t.callExpression(t.identifier("__getModConfig__"), [t.stringLiteral("set_context_limit"), t.stringLiteral(key)]),
-    t.numericLiteral(defaultValue)
-  );
-}
+function transform(code) {
+  // Idempotency: if all three config calls exist, skip
+  const cfgPattern = `__getModConfig__("${MOD_ID}"`;
+  const cfgCount = (code.match(new RegExp(cfgPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
+  if (cfgCount >= 3) {
+    return { code, changed: 0 };
+  }
 
-/**
- * Collect numeric values from sibling VariableDeclaration statements around
- * the target index in the parent body. Each `var X = value;` is its own
- * VariableDeclaration node with a single declarator in minified code.
- */
-function siblingNumericValues(body, targetIndex) {
-  const start = Math.max(0, targetIndex - 3);
-  const end = Math.min(body.length, targetIndex + 4);
-  const values = [];
-  for (let i = start; i < end; i++) {
-    if (i === targetIndex) continue;
-    const stmt = body[i];
-    if (
-      t.isVariableDeclaration(stmt) &&
-      stmt.declarations.length === 1 &&
-      t.isIdentifier(stmt.declarations[0].id) &&
-      t.isNumericLiteral(stmt.declarations[0].init)
-    ) {
-      values.push(stmt.declarations[0].init.value);
+  const cfgCall = (key) => `__getModConfig__("${MOD_ID}", "${key}") ?? 200000`;
+  let count = 0;
+
+  // Find each `var X = 200000;` and scope to its containing brace block
+  const var200kPattern = /var\s+([\w$]+)\s*=\s*200000\s*;/g;
+
+  const candidates = [];
+  let m;
+  while ((m = var200kPattern.exec(code)) !== null) {
+    candidates.push({ name: m[1], index: m.index, matchStr: m[0] });
+  }
+
+  // Process in reverse order to maintain earlier offsets
+  for (let ci = candidates.length - 1; ci >= 0; ci--) {
+    const cand = candidates[ci];
+    const pos = cand.index;
+
+    // Find the containing brace block (or top-level scope)
+    let braceStart = -1;
+    let depth = 0;
+    for (let i = pos; i >= 0; i--) {
+      if (code[i] === '}') depth++;
+      if (code[i] === '{') {
+        if (depth === 0) { braceStart = i; break; }
+        depth--;
+      }
+    }
+
+    let block;
+    let blockStart, blockEnd;
+    if (braceStart === -1) {
+      // Top-level scope: no enclosing braces — use the whole file
+      block = code;
+      blockStart = 0;
+      blockEnd = code.length;
+    } else {
+      let braceEnd = -1;
+      depth = 1;
+      for (let i = braceStart + 1; i < code.length; i++) {
+        if (code[i] === '{') depth++;
+        if (code[i] === '}') { depth--; if (depth === 0) { braceEnd = i; break; } }
+      }
+      if (braceEnd === -1) continue;
+      block = code.substring(braceStart, braceEnd + 1);
+      blockStart = braceStart;
+      blockEnd = braceEnd + 1;
+    }
+
+    // Find neighboring numeric var declarations within this block
+    const neighborPattern = /var\s+([\w$]+)\s*=\s*(\d+)\s*;/g;
+    const neighbors = [];
+    let nm;
+    while ((nm = neighborPattern.exec(block)) !== null) {
+      if (nm[1] !== cand.name) {
+        neighbors.push(parseInt(nm[2], 10));
+      }
+    }
+
+    // Classify by cluster
+    let cfgKey = null;
+    if ([20000, 32000].every(v => neighbors.includes(v))) {
+      cfgKey = "context_limit";
+    } else if ([400000, 50].every(v => neighbors.includes(v))) {
+      cfgKey = "tool_batch_limit";
+    } else if ([250000, 3].every(v => neighbors.includes(v))) {
+      cfgKey = "memory_chunk_limit";
+    }
+
+    if (cfgKey) {
+      const newDecl = `var ${cand.name} = ${cfgCall(cfgKey)};`;
+      code = code.substring(0, cand.index) + newDecl + code.substring(cand.index + cand.matchStr.length);
+      count++;
     }
   }
-  return values;
-}
 
-/**
- * Check if a VariableDeclaration matches the target cluster by position.
- * Works for both unpatched (NumericLiteral init) and already-patched
- * (ConditionalExpression init) variables — used for discovery-only passes.
- */
-function matchesCluster(varPath, targetValue, expectedNeighbors) {
-  const decl = varPath.node.declarations[0];
-  if (!t.isIdentifier(decl.id)) return false;
+  // Now find the context-window variable name (the one with context_limit config)
+  const ctxVarMatch = code.match(/var\s+([\w$]+)\s*=\s*__getModConfig__\("set_context_limit",\s*"context_limit"\)/);
+  if (ctxVarMatch) {
+    const ctxVar = ctxVarMatch[1];
 
-  // For unpatched vars, check the numeric value matches
-  const isUnpatched = t.isNumericLiteral(decl.init) && decl.init.value === targetValue;
-  // For already-patched vars, check the ??-expression has the right numeric default on the right
-  const isPatched = t.isLogicalExpression(decl.init, { operator: "??" }) &&
-    t.isNumericLiteral(decl.init.right) &&
-    decl.init.right.value === targetValue;
+    // Find: > 200000 in a function containing .findLast and "assistant"
+    // Strategy: find the function, then replace > 200000 inside it
+    const findLastPattern = /\.findLast\s*\(/g;
+    let flMatch;
+    while ((flMatch = findLastPattern.exec(code)) !== null) {
+      // Check if "assistant" appears nearby (within 500 chars)
+      const nearby = code.substring(flMatch.index, flMatch.index + 500);
+      if (!nearby.includes('"assistant"')) continue;
 
-  if (!isUnpatched && !isPatched) return false;
-
-  const parent = varPath.parent;
-  if (!parent || !Array.isArray(parent.body)) return false;
-
-  const body = parent.body;
-  const idx = body.indexOf(varPath.node);
-  if (idx === -1) return false;
-
-  const neighbors = siblingNumericValues(body, idx);
-  return expectedNeighbors.every((v) => neighbors.includes(v));
-}
-
-/**
- * Find a single-declarator VariableDeclaration by cluster and return its
- * variable name. Checks both unpatched (NumericLiteral) and already-patched
- * (ConditionalExpression with matching default) states.
- * Returns the variable name or null.
- */
-function discoverVarByCluster(ast, targetValue, expectedNeighbors) {
-  let varName = null;
-
-  traverse(ast, {
-    VariableDeclaration(varPath) {
-      if (varPath.node.declarations.length !== 1) return;
-      if (matchesCluster(varPath, targetValue, expectedNeighbors)) {
-        varName = varPath.node.declarations[0].id.name;
-      }
-    },
-  });
-
-  return varName;
-}
-
-/**
- * Generic transform: find a VariableDeclaration by cluster and replace its init.
- * Returns the variable name or null. Skips already-patched variables.
- */
-function patchByCluster(ast, targetValue, expectedNeighbors, envVarName) {
-  let varName = null;
-
-  traverse(ast, {
-    VariableDeclaration(varPath) {
-      if (varPath.node.declarations.length !== 1) return;
-      const decl = varPath.node.declarations[0];
-      // Idempotency: skip already-patched vars (ConditionalExpression from prior run)
-      // NumericLiteral check is separate — patched vars have ConditionalExpression init.
-      if (t.isLogicalExpression(decl.init, { operator: "??" })) return;
-      if (!t.isIdentifier(decl.id) || !t.isNumericLiteral(decl.init)) return;
-      if (decl.init.value !== targetValue) return;
-
-      const parent = varPath.parent;
-      if (!parent || !Array.isArray(parent.body)) return;
-
-      const body = parent.body;
-      const idx = body.indexOf(varPath.node);
-      if (idx === -1) return;
-
-      const neighbors = siblingNumericValues(body, idx);
-      if (expectedNeighbors.every((v) => neighbors.includes(v))) {
-        varName = decl.id.name;
-        varPath.node.declarations[0].init = buildEnvRead(envVarName, targetValue);
-      }
-    },
-  });
-
-  return varName;
-}
-
-/**
- * Transform 4: Replace hardcoded > 200000 comparison in the function that
- * contains .findLast with "assistant" string literal.
- * Replace the right-hand side with a reference to the context window variable.
- */
-function transformHardcodedComparison(ast, contextWindowVarName) {
-  if (!contextWindowVarName) return 0;
-
-  let changed = 0;
-
-  traverse(ast, {
-    // Walk all functions looking for the one with findLast("assistant")
-    FunctionDeclaration(funcPath) {
-      let hasFindLastAssistant = false;
-
-      funcPath.traverse({
-        CallExpression(callPath) {
-          const callee = callPath.node.callee;
-          if (
-            !t.isMemberExpression(callee) ||
-            !t.isIdentifier(callee.property, { name: "findLast" })
-          ) return;
-
-          // Check if the callback contains a comparison with "assistant"
-          const callback = callPath.node.arguments[0];
-          if (!callback) return;
-
-          // Look for "assistant" string literal anywhere in the callback
-          let foundAssistant = false;
-          callPath.traverse({
-            StringLiteral(strPath) {
-              if (strPath.node.value === "assistant") {
-                foundAssistant = true;
-              }
-            },
-          });
-
-          if (foundAssistant) hasFindLastAssistant = true;
-        },
-      });
-
-      if (!hasFindLastAssistant) return;
-
-      // Now find the > 200000 comparison in this function
-      funcPath.traverse({
-        BinaryExpression(binPath) {
-          if (binPath.node.operator !== ">") return;
-          if (!t.isNumericLiteral(binPath.node.right, { value: 200000 })) return;
-
-          binPath.node.right = t.identifier(contextWindowVarName);
-          changed++;
-        },
-      });
-    },
-  });
-
-  return changed;
-}
-
-function transform(ast) {
-  // Pass 1: Discover + patch all cluster targets (single traversal)
-  // Merges discoverVarByCluster + 3x patchByCluster into one VariableDeclaration walk.
-  let contextWindowVar = null;
-  let contextWindowPatched = 0;
-  let toolBatch = 0;
-  let memoryChunk = 0;
-
-  traverse(ast, {
-    VariableDeclaration(varPath) {
-      if (varPath.node.declarations.length !== 1) return;
-      const decl = varPath.node.declarations[0];
-      if (!t.isIdentifier(decl.id)) return;
-
-      // Discover context window var (both patched and unpatched)
-      if (matchesCluster(varPath, 200000, [20000, 32000])) {
-        contextWindowVar = decl.id.name;
-        // Patch if still a bare NumericLiteral (idempotency)
-        if (t.isNumericLiteral(decl.init) && decl.init.value === 200000) {
-          decl.init = buildCfg("context_limit", 200000);
-          contextWindowPatched = 1;
+      // Find the containing function block
+      let funcBraceStart = -1;
+      let depth = 0;
+      for (let i = flMatch.index; i >= 0; i--) {
+        if (code[i] === '}') depth++;
+        if (code[i] === '{') {
+          if (depth === 0) { funcBraceStart = i; break; }
+          depth--;
         }
-        return; // Can't match other clusters — same target value but different neighbors
       }
+      if (funcBraceStart === -1) continue;
 
-      // Idempotency: skip already-patched vars
-      if (t.isLogicalExpression(decl.init, { operator: "??" })) return;
-      if (!t.isNumericLiteral(decl.init) || decl.init.value !== 200000) return;
-
-      const parent = varPath.parent;
-      if (!parent || !Array.isArray(parent.body)) return;
-      const body = parent.body;
-      const idx = body.indexOf(varPath.node);
-      if (idx === -1) return;
-      const neighbors = siblingNumericValues(body, idx);
-
-      // Tool batch cluster: 200000 with neighbors [400000, 50]
-      if ([400000, 50].every(v => neighbors.includes(v))) {
-        decl.init = buildCfg("tool_batch_limit", 200000);
-        toolBatch = 1;
-        return;
+      let funcBraceEnd = -1;
+      depth = 1;
+      for (let i = funcBraceStart + 1; i < code.length; i++) {
+        if (code[i] === '{') depth++;
+        if (code[i] === '}') { depth--; if (depth === 0) { funcBraceEnd = i; break; } }
       }
+      if (funcBraceEnd === -1) continue;
 
-      // Memory chunk cluster: 200000 with neighbors [250000, 3]
-      if ([250000, 3].every(v => neighbors.includes(v))) {
-        decl.init = buildCfg("memory_chunk_limit", 200000);
-        memoryChunk = 1;
-        return;
+      const funcBlock = code.substring(funcBraceStart, funcBraceEnd + 1);
+
+      // Replace > 200000 in this function block
+      const compPattern = />\s*200000/g;
+      const newFuncBlock = funcBlock.replace(compPattern, `> ${ctxVar}`);
+      if (newFuncBlock !== funcBlock) {
+        code = code.substring(0, funcBraceStart) + newFuncBlock + code.substring(funcBraceEnd + 1);
+        count++;
       }
-    },
-  });
+      break; // Only handle the first matching function
+    }
+  }
 
-  // Pass 2: Replace hardcoded > 200000 comparison (depends on contextWindowVar)
-  const comparison = transformHardcodedComparison(ast, contextWindowVar);
+  if (count === 0) return { code, changed: 0 };
 
-  // Aggregate match count for the engine contract (number or {changed: N}).
-  const total = contextWindowPatched + toolBatch + memoryChunk + comparison;
-  return total;
+  return { code, changed: count };
 }
 
 /** CLI wrapper */
-
 function main() {
   const [, , inputFile, outputFile] = process.argv;
   if (!inputFile) {
@@ -266,44 +171,8 @@ function main() {
 
   const code = fs.readFileSync(inputPath, "utf8");
 
-  let ast;
-  try {
-    ast = parser.parse(code, {
-      sourceType: "unambiguous",
-      plugins: ["jsx", "typescript"],
-    });
-  } catch (err) {
-    console.error(`Error: Failed to parse input file: ${err.message}`);
-    process.exit(1);
-  }
-
-  const results = transform(ast);
-
-  if (results.contextWindowVar) {
-    console.error(`Context window variable: ${results.contextWindowVar}`);
-  } else {
-    console.error("Warning: context window variable not found (pattern may have changed).");
-  }
-
-  if (results.toolBatch) {
-    console.error(`Patched tool batch limit (${results.toolBatch} site(s)).`);
-  } else {
-    console.error("Warning: tool batch limit not found (may already be patched or pattern changed).");
-  }
-
-  if (results.memoryChunk) {
-    console.error(`Patched memory chunk limit (${results.memoryChunk} site(s)).`);
-  } else {
-    console.error("Warning: memory chunk limit not found (may already be patched or pattern changed).");
-  }
-
-  if (results.comparison) {
-    console.error(`Patched hardcoded comparison (now references ${results.contextWindowVar}).`);
-  } else if (results.contextWindowVar) {
-    console.error("Warning: hardcoded > 200000 comparison not found (may already be patched or pattern changed).");
-  }
-
-  const output = generate(ast, { retainLines: false }, code).code;
+  const { code: output, changed } = transform(code);
+  console.error(`Patched ${changed} context limit site(s).`);
 
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");

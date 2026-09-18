@@ -7,13 +7,14 @@ file_id: "cli"
 status_tests:
   # applied: mod guard for this patch is present in the output
   applied: '__isModEnabled__\(\s*["\x27]display_model_slug["\x27]\s*\)'
-  # Accept quoted or template descriptions and literal or escaped middle dots.
+  # Accept quoted or template descriptions and literal or escaped middle dots,
+  # or underscores (engine replaces Unicode middle dots with _ before Babel parse).
   # The injected slug changes this shape, so it does not rematch patched output.
-  applicable: 'Sonnet 4\.6 (?:·|\\xB7) (?:Best for everyday tasks|\$\{)'
+  applicable: 'Sonnet 4\.6 (?:\\xB7|·|_) (?:Best for everyday tasks|\$\{)'
 
 codemod:
   type: "node_script"
-  engine: "babel"
+  engine: "regex"
   script: "codemods/codemod-display-model-slug.cjs"
 
 

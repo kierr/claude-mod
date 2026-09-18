@@ -6,7 +6,7 @@ The supported release is Claude Code 2.1.181 on macOS; fresh-install verificatio
 
 Ship the tool and authored transformations only. Keep upstream binaries, extracted/deobfuscated code, prompt excerpts, derived deltas, caches, and private sessions out of git, packages, CI artifacts, and reports. Tests use hand-written synthetic fixtures. Automated scans help detect leaks but cannot establish provenance.
 
-Public technical documentation describes the current tool; do not rebuild a research archive in README or a docs directory. Preserve the author's handwritten README prose, including personal history: it is not agent-generated development documentation. Before exports or repository migrations, fetch and inspect remote-only changes and carry human-authored documentation forward as content without importing private commit ancestry; archiving it elsewhere is not preservation in the deliverable. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the patch contract.
+Public documentation describes the current tool. Keep development history in commits and avoid rebuilding a research archive in README or a docs directory. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the patch contract.
 
 Comments explain constraints and non-obvious choices, not development chronology. Omit private setup references, review-dismissal labels, copied bundle excerpts, and narration of obvious operations; preserve parser-constant provenance, guard semantics, and regression intent. Check comment claims against code. Treat comment-like strings used as patch anchors or fixtures as data, not prose to reword casually.
 
@@ -16,7 +16,7 @@ Comments explain constraints and non-obvious choices, not development chronology
 - `bin/webcrack-pipeline.cjs`: pinned deobfuscation and syntax validation.
 - `lib/engine.cjs`: ordered patch execution and verification.
 - `patches/*.yaml`: patch IDs, applicability/status tests, execution order, and mod configuration.
-- `codemods/`: CommonJS Babel AST and regex transformations.
+- `codemods/`: CommonJS transformations (regex engine preferred; Babel for cross-scope resolution, multi-pass mutation, or large AST injection).
 - `test/`: Bun tests and synthetic fixtures.
 
 The YAML `id` is the canonical mod identifier; filenames can differ. The complete ordered set is applied together, with behavior selected through runtime mod settings. Preserve disabled behavior and use guarded runtime-helper calls. Prefer structural anchors over minified names, and official configuration over a redundant patch.

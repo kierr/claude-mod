@@ -3,10 +3,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 const MOD_ID = "set_model_limits";
 
@@ -49,350 +45,267 @@ function __modelCaps__(model) {
 }
 `;
 
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
- * Detect the CJS wrapper body + bare `require` parameter name. Mirrors
- * codemod-inject-mods-runtime.cjs: the native-binary-era bundle is wrapped in
- * (function(exports, require, module, __filename, __dirname){ ... }).
+ * Find the containing brace block for a position in code.
+ * Returns { start, end } or null if no enclosing braces.
  */
-function getInjectionTarget(ast) {
-  const firstExpr = ast.program.body.find(
-    (n) => t.isExpressionStatement(n) && !t.isDirective(n)
-  );
-  if (!firstExpr) return null;
-  let fnExpr = firstExpr.expression;
-  // Unwrap layers (IIFE callee, function-as-first-arg, unary !IIFE) until we reach
-  // a FunctionExpression. Superset of mods_runtime's logic, so the real CJS
-  // wrapper (whatever invocation shape) still resolves.
-  for (let i = 0; i < 5 && fnExpr; i++) {
-    if (t.isFunctionExpression(fnExpr)) break;
-    if (t.isCallExpression(fnExpr)) {
-      if (t.isFunctionExpression(fnExpr.callee)) {
-        fnExpr = fnExpr.callee;
-      } else if (fnExpr.arguments.length > 0 && t.isFunctionExpression(fnExpr.arguments[0])) {
-        fnExpr = fnExpr.arguments[0];
-      } else {
-        break;
-      }
-    } else if (t.isUnaryExpression(fnExpr)) {
-      fnExpr = fnExpr.argument;
-    } else {
-      break;
-    }
+function findEnclosingBlock(code, pos) {
+  let braceStart = -1;
+  let depth = 0;
+  for (let i = pos; i >= 0; i--) {
+    if (code[i] === '}') depth++;
+    if (code[i] === '{') { if (depth === 0) { braceStart = i; break; } depth--; }
   }
-  if (
-    t.isFunctionExpression(fnExpr) &&
-    fnExpr.params.some((p) => t.isIdentifier(p, { name: "require" }))
-  ) {
-    return { body: fnExpr.body.body, requireFnName: "require" };
+  if (braceStart === -1) return null;
+
+  depth = 1;
+  let braceEnd = -1;
+  for (let i = braceStart + 1; i < code.length; i++) {
+    if (code[i] === '{') depth++;
+    if (code[i] === '}') { depth--; if (depth === 0) { braceEnd = i; break; } }
   }
-  return null;
+  if (braceEnd === -1) return null;
+
+  return { start: braceStart, end: braceEnd };
 }
 
-/** mod guard: typeof __isModEnabled__==="function" && __isModEnabled__("set_model_limits") && typeof __modelCaps__==="function" */
-function buildGuard() {
-  return t.logicalExpression(
-    "&&",
-    t.logicalExpression(
-      "&&",
-      t.binaryExpression(
-        "===",
-        t.unaryExpression("typeof", t.identifier("__isModEnabled__")),
-        t.stringLiteral("function")
-      ),
-      t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(MOD_ID)])
-    ),
-    t.binaryExpression(
-      "===",
-      t.unaryExpression("typeof", t.identifier("__modelCaps__")),
-      t.stringLiteral("function")
-    )
-  );
-}
+/**
+ * Four transforms:
+ *
+ * T1: Inject __modelCaps__ helper alongside __modsLoad__ in the CJS wrapper.
+ *
+ * T2: CXH output override — function returning { default: X, upperLimit: Y }
+ *     that reads .max_tokens. Insert override before the return.
+ *
+ * T3: w37 context override — function with multiple `return 1000000` and a
+ *     regex test on the first param. Insert override at top of function body.
+ *
+ * T4: Effective output override — function returning `.effective` from a call
+ *     with "CLAUDE_CODE_MAX_OUTPUT_TOKENS". Insert override at top.
+ */
+function transform(code) {
+  if (typeof code !== "string") return { code: "", changed: 0 };
 
-/** True if `root`'s subtree contains a call to `fnName`(). */
-function containsCall(root, fnName) {
-  const stack = [root];
-  while (stack.length) {
-    const n = stack.pop();
-    if (!n || typeof n !== "object") continue;
-    if (t.isCallExpression(n) && t.isIdentifier(n.callee, { name: fnName })) return true;
-    for (const key of Object.keys(n)) {
-      if (key === "loc" || key === "start" || key === "end" || key === "type") continue;
-      const child = n[key];
-      if (Array.isArray(child)) {
-        for (const c of child) if (c && typeof c === "object") stack.push(c);
-      } else if (child && typeof child === "object") {
-        stack.push(child);
-      }
-    }
+  // Idempotency: check for our marker comments
+  if (code.includes("model_limits_out") && code.includes("model_limits_ctx")) {
+    return { code, changed: 0 };
   }
-  return false;
-}
 
-/** Read a `.max_tokens` property access (plain or optional) anywhere under `fn`. */
-function readsMaxTokens(fnPath) {
-  let found = false;
-  fnPath.traverse({
-    MemberExpression(p) {
-      if (!p.node.computed && t.isIdentifier(p.node.property, { name: "max_tokens" })) found = true;
-    },
-    OptionalMemberExpression(p) {
-      if (!p.node.computed && t.isIdentifier(p.node.property, { name: "max_tokens" })) found = true;
-    },
-  });
-  return found;
-}
+  let count = 0;
+  const edits = []; // { index, type: "insert_before"|"insert_after"|"replace", text }
 
-function transform(ast) {
-  let changed = 0;
+  // --- T1: Inject __modelCaps__ helper ---
+  if (!code.includes("function __modelCaps__(")) {
+    // Find the CJS wrapper and the require function name
+    const wrapperPattern = /\(function\s*\(\s*exports\s*,\s*([\w$]+)\s*,\s*module\s*,\s*__filename\s*,\s*__dirname\s*\)\s*\{/g;
+    const wrapperMatch = wrapperPattern.exec(code);
+    if (wrapperMatch) {
+      const requireFnName = wrapperMatch[1];
+      const resolvedHelper = HELPER_CODE.replace(/__REQUIRE_FN__/g, requireFnName);
 
-  // Transform 1: inject __modelCaps__ helper (idempotent on its declaration)
-  let helperPresent = false;
-  traverse(ast, {
-    FunctionDeclaration(fnPath) {
-      if (t.isIdentifier(fnPath.node.id, { name: "__modelCaps__" })) helperPresent = true;
-    },
-  });
-  if (!helperPresent) {
-    const target = getInjectionTarget(ast);
-    if (target) {
-      const resolved = HELPER_CODE.replace(/__REQUIRE_FN__/g, target.requireFnName);
-      const helperStmts = parser.parse(resolved, { sourceType: "script" }).program.body;
-      // Insert after the last mods-runtime helper if present, else at wrapper top.
-      let insertIndex = 0;
-      for (let i = 0; i < target.body.length; i++) {
-        const s = target.body[i];
-        if (
-          t.isFunctionDeclaration(s) &&
-          t.isIdentifier(s.id) &&
-          ["__getModConfig__", "__isModEnabled__", "__modsLoad__"].includes(s.id.name)
-        ) {
-          insertIndex = i + 1;
+      // Find insertion point: after __modsLoad__/__isModEnabled__/__getModConfig__
+      const wrapperBodyStart = code.indexOf("{", wrapperMatch.index) + 1;
+      const wrapperBody = code.substring(wrapperBodyStart);
+
+      // Find the last helper function declaration
+      let insertOffset = 0;
+      const helperNames = ["__modsLoad__", "__isModEnabled__", "__getModConfig__"];
+      for (const hName of helperNames) {
+        const hIdx = wrapperBody.indexOf(`function ${hName}`);
+        if (hIdx !== -1) {
+          // Find the end of this function
+          const funcBodyStart = wrapperBody.indexOf("{", hIdx);
+          if (funcBodyStart !== -1) {
+            let depth = 1;
+            for (let i = funcBodyStart + 1; i < wrapperBody.length; i++) {
+              if (wrapperBody[i] === '{') depth++;
+              if (wrapperBody[i] === '}') { depth--; if (depth === 0) { insertOffset = Math.max(insertOffset, i + 1); break; } }
+            }
+          }
         }
       }
-      for (let i = helperStmts.length - 1; i >= 0; i--) {
-        target.body.splice(insertIndex, 0, helperStmts[i]);
-      }
-      changed++;
-    } else {
-      console.error("Warning: no CJS wrapper injection target; __modelCaps__ not injected.");
+
+      edits.push({
+        index: wrapperBodyStart + insertOffset,
+        type: "insert_after",
+        text: "\n" + resolvedHelper + "\n"
+      });
+      count++;
     }
   }
 
-  // Transform 2: CXH (getModelMaxOutputTokens) output override
-  // Unique shape: a function whose body returns {default:<id>, upperLimit:<id>}
-  // and reads `.max_tokens`. Insert the override before that return.
-  let cxhPatched = false;
-  traverse(ast, {
-    FunctionDeclaration(fnPath) {
-      if (cxhPatched) return;
-      const fn = fnPath.node;
-      if (containsCall(fn, "__modelCaps__")) return;
-      if (!readsMaxTokens(fnPath)) return;
-      let retPath = null;
-      let defaultId = null;
-      let upperId = null;
-      fnPath.traverse({
-        ReturnStatement(rPath) {
-          if (retPath) return;
-          const arg = rPath.node.argument;
-          if (!t.isObjectExpression(arg)) return;
-          let dProp = null;
-          let uProp = null;
-          for (const prop of arg.properties) {
-            if (!t.isObjectProperty(prop)) continue;
-            if (t.isIdentifier(prop.key, { name: "default" })) dProp = prop;
-            if (t.isIdentifier(prop.key, { name: "upperLimit" })) uProp = prop;
-          }
-          if (dProp && uProp) {
-            retPath = rPath;
-            defaultId = dProp.value;
-            upperId = uProp.value;
-          }
-        },
-      });
-      if (
-        retPath &&
-        t.isIdentifier(defaultId) &&
-        t.isIdentifier(upperId) &&
-        fn.params.length >= 1
-      ) {
-        const modelId = t.cloneNode(fn.params[0], true);
-        const override = t.ifStatement(
-          buildGuard(),
-          t.blockStatement([
-            t.variableDeclaration("var", [
-              t.variableDeclarator(
-                t.identifier("__mcOut"),
-                t.callExpression(t.identifier("__modelCaps__"), [modelId])
-              ),
-            ]),
-            t.ifStatement(
-              t.logicalExpression(
-                "&&",
-                t.identifier("__mcOut"),
-                t.memberExpression(t.identifier("__mcOut"), t.identifier("output"))
-              ),
-              t.blockStatement([
-                t.expressionStatement(
-                  t.assignmentExpression(
-                    "=",
-                    t.cloneNode(upperId, true),
-                    t.memberExpression(t.identifier("__mcOut"), t.identifier("output"))
-                  )
-                ),
-                t.expressionStatement(
-                  t.assignmentExpression(
-                    "=",
-                    t.cloneNode(defaultId, true),
-                    t.callExpression(
-                      t.memberExpression(t.identifier("Math"), t.identifier("min")),
-                      [t.cloneNode(defaultId, true), t.cloneNode(upperId, true)]
-                    )
-                  )
-                ),
-              ])
-            ),
-          ])
-        );
-        t.addComment(override, "leading", " model_limits_out ");
-        retPath.insertBefore(override);
-        cxhPatched = true;
-        changed++;
+  // --- T2: CXH output override ---
+  // Find function that: (a) reads .max_tokens, (b) returns { default: X, upperLimit: Y }
+  // Pattern: return { default: IDENT, upperLimit: IDENT };
+  // preceded by .max_tokens access
+  const maxTokensIdx = code.indexOf(".max_tokens");
+  if (maxTokensIdx !== -1) {
+    const block = findEnclosingBlock(code, maxTokensIdx);
+    if (block) {
+      const funcCode = code.substring(block.start, block.end + 1);
+
+      // Find return { default: X, upperLimit: Y }
+      const returnPattern = /return\s*\{\s*default\s*:\s*([\w$]+)\s*,\s*upperLimit\s*:\s*([\w$]+)\s*\}/;
+      const retMatch = funcCode.match(returnPattern);
+
+      if (retMatch) {
+        // Find the function's parameter name (first param)
+        const fnHeaderEnd = code.indexOf("{", block.start);
+        const fnHeader = code.substring(Math.max(0, block.start - 100), fnHeaderEnd);
+        const paramMatch = fnHeader.match(/\(\s*([\w$]+)\s*\)\s*$/);
+        const paramName = paramMatch ? paramMatch[1] : "H";
+
+        const guard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}") && typeof __modelCaps__ === "function"`;
+        const override = `/* model_limits_out */ if (${guard}) { var __mcOut = __modelCaps__(${paramName}); if (__mcOut && __mcOut.output) return __mcOut.output; } `;
+
+        // Insert before the return statement
+        const returnAbsIdx = code.indexOf(retMatch[0], block.start);
+        if (returnAbsIdx !== -1) {
+          edits.push({ index: returnAbsIdx, type: "insert_before", text: override });
+          count++;
+        }
       }
-    },
-  });
-  if (!cxhPatched) {
-    console.error("Warning: getModelMaxOutputTokens (CXH) not found; output override not applied.");
+    }
   }
 
-  // Transform 3: w37 (getContextWindowForModel) context override
-  // Unique shape: the function with >=2 `return 1000000;` statements. Insert the
-  // override at the top of its body so the file is authoritative.
-  let w37Patched = false;
-  traverse(ast, {
-    FunctionDeclaration(fnPath) {
-      if (w37Patched) return;
-      const fn = fnPath.node;
-      if (containsCall(fn, "__modelCaps__")) return;
-      // getContextWindowForModel: the unique function with >=2 `return 1000000`
-      // statements (they nest inside if-branches, so traverse the whole body).
-      let countM = 0;
-      fnPath.traverse({
-        ReturnStatement(p) {
-          if (t.isNumericLiteral(p.node.argument, { value: 1000000 })) countM++;
-        },
-      });
-      if (countM >= 2 && fn.params.length >= 1) {
-        const modelId = t.cloneNode(fn.params[0], true);
-        const override = t.ifStatement(
-          buildGuard(),
-          t.blockStatement([
-            t.variableDeclaration("var", [
-              t.variableDeclarator(
-                t.identifier("__mcCtx"),
-                t.callExpression(t.identifier("__modelCaps__"), [modelId])
-              ),
-            ]),
-            t.ifStatement(
-              t.logicalExpression(
-                "&&",
-                t.identifier("__mcCtx"),
-                t.memberExpression(t.identifier("__mcCtx"), t.identifier("context"))
-              ),
-              t.returnStatement(
-                t.memberExpression(t.identifier("__mcCtx"), t.identifier("context"))
-              )
-            ),
-          ])
-        );
-        t.addComment(override, "leading", " model_limits_ctx ");
-        fn.body.body.unshift(override);
-        w37Patched = true;
-        changed++;
-      }
-    },
-  });
-  if (!w37Patched) {
-    console.error("Warning: getContextWindowForModel (w37) not found; context override not applied.");
-  }
+  // --- T3: w37 context override ---
+  // Function containing multiple `return 1000000` statements.
+  const return100kPattern = /return\s+1000000\s*;/g;
+  const return100kMatches = [...code.matchAll(return100kPattern)];
 
-  // Override the effective output-limit resolver, not only its defaults.
-  // Otherwise the global environment cap and stock ceiling still restrict the result.
-  // Anchor on the effective property of the max-output-token lookup.
-  let effPatched = false;
-  traverse(ast, {
-    FunctionDeclaration(fnPath) {
-      if (effPatched) return;
-      const fn = fnPath.node;
-      if (!fn.body || !Array.isArray(fn.body.body) || fn.params.length < 1) return;
-      if (containsCall(fn, "__modelCaps__")) return;
-      let hasEff = false;
-      for (const stmt of fn.body.body) {
-        if (!t.isReturnStatement(stmt)) continue;
-        const arg = stmt.argument;
-        if (
-          t.isMemberExpression(arg, { computed: false }) &&
-          t.isIdentifier(arg.property, { name: "effective" }) &&
-          t.isCallExpression(arg.object) &&
-          t.isStringLiteral(arg.object.arguments[0], {
-            value: "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
-          })
-        ) {
-          hasEff = true;
+  // Strategy: find each `return 1000000`, then find its containing function body
+  // (not the innermost if-block). Group by function, patch the one with >=2.
+  {
+    const funcReturns = new Map(); // funcBodyStart → { block, count, paramName }
+
+    for (const m of return100kMatches) {
+      // Walk up through nested blocks to find the function-level block
+      let pos = m.index;
+      let funcBlock = null;
+      let depth = 0;
+
+      // Scan backward to find the function keyword, then its opening brace
+      let scanPos = pos;
+      while (scanPos > 0) {
+        // Find the nearest opening brace that's a function body
+        let braceStart = -1;
+        let d = 0;
+        for (let i = scanPos; i >= 0; i--) {
+          if (code[i] === '}') d++;
+          if (code[i] === '{') { if (d === 0) { braceStart = i; break; } d--; }
+        }
+        if (braceStart === -1) break;
+
+        // Check if this brace belongs to a function
+        const before = code.substring(Math.max(0, braceStart - 200), braceStart);
+        if (/function\s*[\w$]*\s*\([^)]*\)\s*$/.test(before) ||
+            /=>\s*$/.test(before)) {
+          // This is a function body brace
+          funcBlock = braceStart;
           break;
         }
+        // Move past this block and keep searching outward
+        scanPos = braceStart - 1;
       }
-      if (!hasEff) return;
-      const modelId = t.cloneNode(fn.params[0], true);
-      const override = t.ifStatement(
-        buildGuard(),
-        t.blockStatement([
-          t.variableDeclaration("var", [
-            t.variableDeclarator(
-              t.identifier("__mcEff"),
-              t.callExpression(t.identifier("__modelCaps__"), [modelId])
-            ),
-          ]),
-          t.ifStatement(
-            t.logicalExpression(
-              "&&",
-              t.identifier("__mcEff"),
-              t.memberExpression(t.identifier("__mcEff"), t.identifier("output"))
-            ),
-            t.returnStatement(
-              t.memberExpression(t.identifier("__mcEff"), t.identifier("output"))
-            )
-          ),
-        ])
-      );
-      t.addComment(override, "leading", " model_limits_out_eff ");
-      fn.body.body.unshift(override);
-      effPatched = true;
-      changed++;
-    },
-  });
-  if (!effPatched) {
-    console.error("Warning: effective output site (S$H) not found; output may be capped by the global env var.");
+
+      if (funcBlock === null) continue;
+
+      if (!funcReturns.has(funcBlock)) {
+        // Find the matching closing brace
+        let braceEnd = -1;
+        let d = 1;
+        for (let i = funcBlock + 1; i < code.length; i++) {
+          if (code[i] === '{') d++;
+          if (code[i] === '}') { d--; if (d === 0) { braceEnd = i; break; } }
+        }
+
+        // Get param name: look at the text just before this brace
+        // which should be the function header
+        const fnHeader = code.substring(Math.max(0, funcBlock - 200), funcBlock);
+        const paramMatch = fnHeader.match(/\(\s*([\w$]+)\s*[),]/);
+        // Use the LAST match to handle nested functions (the innermost one wins)
+        const allParamMatches = [...fnHeader.matchAll(/\(\s*([\w$]+)\s*[),]/g)];
+        const paramName = allParamMatches.length > 0 ? allParamMatches[allParamMatches.length - 1][1] : "H";
+
+        funcReturns.set(funcBlock, { blockStart: funcBlock, blockEnd: braceEnd, count: 0, paramName });
+      }
+      funcReturns.get(funcBlock).count++;
+    }
+
+    for (const [, info] of funcReturns) {
+      if (info.count < 2) continue;
+      if (info.blockEnd === -1) continue;
+
+      const funcCode = code.substring(info.blockStart, info.blockEnd + 1);
+      if (funcCode.includes("model_limits_ctx")) continue;
+      if (funcCode.includes("upperLimit")) continue; // Skip CXH function
+
+      const guard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}") && typeof __modelCaps__ === "function"`;
+      const override = `\n  /* model_limits_ctx */ if (${guard}) { var __mcCtx = __modelCaps__(${info.paramName}); if (__mcCtx && __mcCtx.context) return __mcCtx.context; } \n`;
+
+      // Insert at the beginning of the function body (after opening brace)
+      edits.push({ index: info.blockStart + 1, type: "insert_after", text: override });
+      count++;
+      break; // Only patch the first matching function
+    }
   }
 
-  return changed;
+  // --- T4: Effective output override ---
+  // Function that returns CALL(..., "CLAUDE_CODE_MAX_OUTPUT_TOKENS", ...).effective
+  const effPattern = /return\s+([\w$]+)\(\s*"CLAUDE_CODE_MAX_OUTPUT_TOKENS"[^)]*\)\s*\.effective\s*;/g;
+  let effMatch;
+  while ((effMatch = effPattern.exec(code)) !== null) {
+    const block = findEnclosingBlock(code, effMatch.index);
+    if (!block) continue;
+
+    const funcCode = code.substring(block.start, block.end + 1);
+    if (funcCode.includes("model_limits_out_eff")) continue;
+
+    // Find the function's parameter name
+    const fnHeaderEnd = code.indexOf("{", block.start);
+    const fnHeader = code.substring(Math.max(0, block.start - 100), fnHeaderEnd);
+    const paramMatch = fnHeader.match(/\(\s*([\w$]+)\s*\)/);
+    const paramName = paramMatch ? paramMatch[1] : "H";
+
+    const guard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}") && typeof __modelCaps__ === "function"`;
+    const override = `/* model_limits_out_eff */ if (${guard}) { var __mcEff = __modelCaps__(${paramName}); if (__mcEff && __mcEff.output) return __mcEff.output; } `;
+
+    // Insert at the beginning of the function body
+    edits.push({ index: block.start + 1, type: "insert_after", text: "\n  " + override + "\n" });
+    count++;
+    break; // Only patch the first matching function
+  }
+
+  // Apply edits in reverse order (descending index) to maintain offsets
+  edits.sort((a, b) => b.index - a.index);
+
+  for (const edit of edits) {
+    if (edit.type === "insert_before") {
+      code = code.substring(0, edit.index) + edit.text + code.substring(edit.index);
+    } else if (edit.type === "insert_after") {
+      code = code.substring(0, edit.index) + edit.text + code.substring(edit.index);
+    }
+  }
+
+  if (count === 0) return { code, changed: 0 };
+
+  return { code, changed: count };
 }
 
+/** CLI wrapper */
 function main() {
   const [, , inputFile, outputFile] = process.argv;
   if (!inputFile) {
     console.error("Usage: codemod-set-model-limits.cjs <input.js> [output.js]");
     process.exit(1);
   }
-  const code = fs.readFileSync(path.resolve(inputFile), "utf8");
-  const ast = parser.parse(code, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
-  const changed = transform(ast);
+  const inputCode = fs.readFileSync(path.resolve(inputFile), "utf8");
+  const { code: output, changed } = transform(inputCode);
   console.error(`set_model_limits: ${changed} change(s).`);
-  const output = generate(ast, { retainLines: false }, code).code;
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");
   } else {

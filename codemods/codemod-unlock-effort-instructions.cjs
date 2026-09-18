@@ -2,401 +2,299 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 const MOD_ID = "unlock_effort_instructions";
 
-
-// Discovery: find minified names by structural signatures
-
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /**
- * Single-pass discovery of all three minified function names.
- * Merges discoverUltrathinkDetector + discoverEffortGetter + discoverEffortSupport
- * into one AST traversal (was 3, now 1).
+ * Discover and transform the effort/ultrathink system:
  *
- * Returns { ultrathinkFn, effortGetterFn, effortSupportFn } — any may be null.
+ * 1. Discover minified names:
+ *    - Ultrathink detector: returns [{ type: "ultrathink_effort", ... }]
+ *    - Effort getter: accesses .effortLevel
+ *    - Effort support: contains "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"
+ *    - Settings getter: found from canonical call site { settings: GETTER() }
+ *
+ * 2. Modify the ultrathink detector: add model+effort params, insert override logic.
+ * 3. Transform the call site: add mainLoopModel + effortValue arguments.
  */
-function discoverAll(ast) {
-  const TARGET = "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT";
-  let ultrathinkFn = null;
-  let effortGetterFn = null;
-  let effortGetterParams = null;
-  let effortSupportFn = null;
-  let settingsGetterFn = null;
+function transform(code) {
+  if (typeof code !== "string") return { code: "", changed: 0 };
 
-  traverse(ast, {
-    // Discover ultrathink detector: FunctionDeclaration whose body contains
-    // ReturnStatement → ArrayExpression → ObjectExpression with { type: "ultrathink_effort" }
-    FunctionDeclaration(funcPath) {
-      if (!funcPath.node.id || !t.isIdentifier(funcPath.node.id)) return;
-      const body = funcPath.node.body;
-      if (!t.isBlockStatement(body)) return;
-
-      // Check for ultrathink detector signature
-      if (!ultrathinkFn) {
-        for (const stmt of body.body) {
-          if (!t.isReturnStatement(stmt) || !t.isArrayExpression(stmt.argument)) continue;
-          for (const elem of stmt.argument.elements) {
-            if (!t.isObjectExpression(elem)) continue;
-            for (const prop of elem.properties) {
-              if (
-                t.isObjectProperty(prop) &&
-                !prop.computed &&
-                t.isIdentifier(prop.key, { name: "type" }) &&
-                t.isStringLiteral(prop.value, { value: "ultrathink_effort" })
-              ) {
-                ultrathinkFn = funcPath.node.id.name;
-                break;
-              }
-            }
-            if (ultrathinkFn) break;
-          }
-          if (ultrathinkFn) break;
-        }
-      }
-
-      // Check for effort getter signature: last stmt is return CallExpr(X.effortLevel)
-      if (!effortGetterFn && body.body.length >= 1) {
-        const stmt = body.body[body.body.length - 1];
-        if (t.isReturnStatement(stmt) && t.isCallExpression(stmt.argument) &&
-            stmt.argument.arguments.length === 1) {
-          const arg = stmt.argument.arguments[0];
-          if (
-            t.isMemberExpression(arg) && !arg.computed &&
-            t.isIdentifier(arg.property, { name: "effortLevel" })
-          ) {
-            effortGetterFn = funcPath.node.id.name;
-            effortGetterParams = funcPath.node.params.length;
-          }
-        }
-      }
-    },
-    // Discover effort support check: StringLiteral containing target env var
-    StringLiteral(path) {
-      if (effortSupportFn) return;
-      if (path.node.value !== TARGET) return;
-      const funcPath = path.getFunctionParent();
-      if (
-        funcPath &&
-        t.isFunctionDeclaration(funcPath.node) &&
-        funcPath.node.id &&
-        t.isIdentifier(funcPath.node.id)
-      ) {
-        effortSupportFn = funcPath.node.id.name;
-      }
-    },
-    // Also match dot-access: process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT
-    Identifier(path) {
-      if (effortSupportFn) return;
-      if (path.node.name !== TARGET) return;
-      const parent = path.parent;
-      if (!t.isMemberExpression(parent) || parent.computed) return;
-      if (parent.property !== path.node) return;
-      const funcPath = path.getFunctionParent();
-      if (
-        funcPath &&
-        t.isFunctionDeclaration(funcPath.node) &&
-        funcPath.node.id &&
-        t.isIdentifier(funcPath.node.id)
-      ) {
-        effortSupportFn = funcPath.node.id.name;
-      }
-    },
-  });
-
-  // For getters that accept state, discover the settings resolver from an
-  // existing call that supplies cli, env, and settings fields.
-  if (effortGetterFn && effortGetterParams > 0) {
-    traverse(ast, {
-      CallExpression(path) {
-        if (settingsGetterFn) return;
-        const callee = path.node.callee;
-        if (!t.isIdentifier(callee, { name: effortGetterFn })) return;
-        const arg0 = path.node.arguments[0];
-        if (!t.isObjectExpression(arg0)) return;
-        for (const prop of arg0.properties) {
-          if (
-            t.isObjectProperty(prop) && !prop.computed &&
-            t.isIdentifier(prop.key, { name: "settings" }) &&
-            t.isCallExpression(prop.value) && t.isIdentifier(prop.value.callee)
-          ) {
-            settingsGetterFn = prop.value.callee.name;
-            break;
-          }
-        }
-      },
-    });
+  // Fail-closed: if already patched, throw
+  if (code.includes("_patchResults") && code.includes("_patchEffort")) {
+    throw new Error("Already patched — re-application would produce duplicate code.");
   }
 
-  return { ultrathinkFn, effortGetterFn, effortGetterParams, effortSupportFn, settingsGetterFn };
-}
+  // --- Discovery ---
 
-
-// AST builders
-
-
-/** typeof __isModEnabled__ === "function" && __isModEnabled__(modId) */
-function buildModGuard(modId) {
-  return t.logicalExpression(
-    "&&",
-    t.binaryExpression(
-      "===",
-      t.unaryExpression("typeof", t.identifier("__isModEnabled__")),
-      t.stringLiteral("function")
-    ),
-    t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(modId)])
-  );
-}
-
-/**
- * Call zero-argument getters directly. Other forms require a state object;
- * use an empty cli layer to let environment and settings determine effort.
- */
-function buildEffortGetterCall(effortGetterFn, effortGetterParams, settingsGetterFn) {
-  const callee = t.identifier(effortGetterFn);
-  if (!effortGetterParams || effortGetterParams === 0) {
-    return t.callExpression(callee, []);
-  }
-  return t.callExpression(callee, [
-    t.objectExpression([
-      t.objectProperty(t.identifier("cli"), t.objectExpression([])),
-      t.objectProperty(
-        t.identifier("env"),
-        t.memberExpression(t.identifier("process"), t.identifier("env"))
-      ),
-      t.objectProperty(
-        t.identifier("settings"),
-        t.callExpression(t.identifier(settingsGetterFn), [])
-      ),
-    ]),
-  ]);
-}
-
-
-// Main transform
-
-
-function transform(ast) {
-  // Pass 1: Discover minified names (single traversal)
-  const { ultrathinkFn, effortGetterFn, effortGetterParams, effortSupportFn, settingsGetterFn } = discoverAll(ast);
-  if (!ultrathinkFn) {
+  // Ultrathink detector: function whose return contains type: "ultrathink_effort"
+  // Key: look for `type: "ultrathink_effort"` preceded by a function declaration
+  // We find the function by scanning backward from the string to the nearest function header
+  const ultraIdx = code.indexOf('type: "ultrathink_effort"');
+  if (ultraIdx === -1) {
     throw new Error("Could not find ultrathink detector function (contains 'ultrathink_effort')");
   }
+
+  // Find the containing function
+  let ultraFn = null;
+  let ultraParam = null;
+  {
+    // Find the nearest function keyword before this position
+    let searchFrom = ultraIdx;
+    while (searchFrom > 0) {
+      const fnIdx = code.lastIndexOf("function ", searchFrom);
+      if (fnIdx === -1) break;
+
+      // Parse: function NAME(PARAMS) {
+      const fnHeader = code.substring(fnIdx, fnIdx + 200);
+      const fnMatch = fnHeader.match(/^function\s+([\w$]+)\s*\(([^)]*)\)\s*\{/);
+      if (fnMatch) {
+        // Verify this function actually contains the ultrathink_effort return
+        const fnBodyStart = fnIdx + fnMatch[0].length;
+        const searchEnd = Math.min(code.length, fnBodyStart + 5000);
+        const fnBody = code.substring(fnIdx, searchEnd);
+        if (fnBody.includes('type: "ultrathink_effort"')) {
+          ultraFn = fnMatch[1];
+          ultraParam = fnMatch[2].trim();
+          break;
+        }
+      }
+      searchFrom = fnIdx - 1;
+    }
+  }
+
+  if (!ultraFn) {
+    throw new Error("Could not find ultrathink detector function (contains 'ultrathink_effort')");
+  }
+
+  // Effort getter: function that accesses .effortLevel
+  const effortLevelIdx = code.indexOf(".effortLevel");
+  if (effortLevelIdx === -1) {
+    throw new Error("Could not find effort level getter function (returns call on 'effortLevel')");
+  }
+
+  let effortGetterFn = null;
+  let effortGetterParams = 0;
+  {
+    let searchFrom = effortLevelIdx;
+    while (searchFrom > 0) {
+      const fnIdx = code.lastIndexOf("function ", searchFrom);
+      if (fnIdx === -1) break;
+
+      const fnHeader = code.substring(fnIdx, fnIdx + 200);
+      const fnMatch = fnHeader.match(/^function\s+([\w$]+)\s*\(([^)]*)\)\s*\{/);
+      if (fnMatch) {
+        const searchEnd = Math.min(code.length, fnIdx + 5000);
+        const fnBody = code.substring(fnIdx, searchEnd);
+        if (fnBody.includes(".effortLevel")) {
+          effortGetterFn = fnMatch[1];
+          effortGetterParams = fnMatch[2].trim() ? fnMatch[2].split(",").length : 0;
+          break;
+        }
+      }
+      searchFrom = fnIdx - 1;
+    }
+  }
+
   if (!effortGetterFn) {
     throw new Error("Could not find effort level getter function (returns call on 'effortLevel')");
   }
+
+  // Effort support check: function containing "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"
+  // There may be multiple occurrences — the first is typically a constants declaration
+  // like CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: () => Gjc. We need the one inside a function
+  // that uses it in a conditional (rt(process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT)).
+  let effortSupportFn = null;
+  {
+    let searchFrom = 0;
+    while (true) {
+      const idx = code.indexOf("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", searchFrom);
+      if (idx === -1) break;
+      searchFrom = idx + 1;
+
+      // Skip occurrences that are part of a constants/object declaration
+      // (e.g. "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: () => Gjc,")
+      const lineStart = code.lastIndexOf('\n', idx) + 1;
+      const linePrefix = code.substring(lineStart, idx).trim();
+      // If the line starts with the env var name itself, it's likely a declaration
+      if (linePrefix.length === 0 || /^[A-Z_]+$/.test(linePrefix)) continue;
+
+      // This occurrence is inside code — find the containing function
+      let fnSearchFrom = idx;
+      while (fnSearchFrom > 0) {
+        const fnIdx = code.lastIndexOf("function ", fnSearchFrom);
+        if (fnIdx === -1) break;
+
+        const fnHeader = code.substring(fnIdx, fnIdx + 200);
+        const fnMatch = fnHeader.match(/^function\s+([\w$]+)\s*\(([^)]*)\)\s*\{/);
+        if (fnMatch) {
+          const searchEnd = Math.min(code.length, fnIdx + 2000);
+          const fnBody = code.substring(fnIdx, searchEnd);
+          if (fnBody.includes("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")) {
+            effortSupportFn = fnMatch[1];
+            break;
+          }
+        }
+        fnSearchFrom = fnIdx - 1;
+      }
+      if (effortSupportFn) break;
+    }
+  }
+
   if (!effortSupportFn) {
     throw new Error("Could not find effort support check function ('CLAUDE_CODE_ALWAYS_ENABLE_EFFORT')");
   }
-  if (effortGetterParams > 0 && !settingsGetterFn) {
-    throw new Error(
-      `Effort getter ${effortGetterFn} takes a state argument (${effortGetterParams} params) but ` +
-      `no canonical call site ({..., settings: <getter>()}) was found to derive the settings getter. ` +
-      `Refusing to emit a bare call that would crash at runtime.`
-    );
-  }
 
-  console.error(`Discovered: ultrathink=${ultrathinkFn}, effortGetter=${effortGetterFn} (${effortGetterParams} params), effortSupport=${effortSupportFn}, settingsGetter=${settingsGetterFn || "n/a"}`);
-
-  // Pass 2: Transform function body + call site (single traversal)
-  let bodyChanged = 0;
-  let callSiteChanged = 0;
-  let mainLoopModelExpr = null;
-
-  traverse(ast, {
-    FunctionDeclaration(funcPath) {
-      if (!t.isIdentifier(funcPath.node.id, { name: ultrathinkFn })) return;
-
-      const body = funcPath.node.body;
-      if (!t.isBlockStatement(body)) return;
-      const stmts = body.body;
-
-      // Validate expected 3-statement structure: [if-stmt, expr-stmt, return-stmt]
-      if (stmts.length !== 3) {
-        throw new Error(`Expected 3 statements in ${ultrathinkFn}, found ${stmts.length}`);
+  // Settings getter: found from canonical call site
+  let settingsGetterFn = null;
+  if (effortGetterParams > 0) {
+    // Look for { settings: GETTER() } near a call to effortGetterFn or near "cli:"
+    const settingsPattern = /settings:\s*([\w$]+)\(\)/g;
+    let sm;
+    while ((sm = settingsPattern.exec(code)) !== null) {
+      const nearby = code.substring(Math.max(0, sm.index - 300), sm.index + 100);
+      if (nearby.includes("cli:") || nearby.includes(effortGetterFn)) {
+        settingsGetterFn = sm[1];
+        break;
       }
-      if (!t.isIfStatement(stmts[0])) {
-        throw new Error(`First statement in ${ultrathinkFn} is not an if-statement`);
-      }
-      if (!t.isExpressionStatement(stmts[1])) {
-        throw new Error(`Second statement in ${ultrathinkFn} is not an expression statement`);
-      }
-      if (!t.isReturnStatement(stmts[2])) {
-        throw new Error(`Third statement in ${ultrathinkFn} is not a return statement`);
-      }
+    }
 
-      // 1. Add model + effort parameters (effort = per-turn resolved effortValue,
-      //    passed from the call site via _.getAppState().effortValue; covers max
-      //    and transient /effort + --effort, which the settings getter cannot see)
-      funcPath.node.params.push(t.identifier("model"));
-      funcPath.node.params.push(t.identifier("effort"));
-
-      // 2. Build new body
-      const origIf = stmts[0];
-      const origTelemetry = stmts[1];
-      const origReturn = stmts[2];
-      const ultrathinkArray = origReturn.argument;
-
-      // Restructure if-statement: keep condition, clear consequent, add else branch
-      origIf.consequent = t.blockStatement([]);
-      origIf.alternate = t.blockStatement([
-        origTelemetry,
-        t.expressionStatement(
-          t.callExpression(
-            t.memberExpression(t.identifier("_patchResults"), t.identifier("push")),
-            [t.spreadElement(ultrathinkArray)]
-          )
-        ),
-      ]);
-
-      const newBody = [
-        // let _patchResults = [];
-        t.variableDeclaration("let", [
-          t.variableDeclarator(t.identifier("_patchResults"), t.arrayExpression([])),
-        ]),
-        // restructured if-else
-        origIf,
-        // effort fallback:
-        //   if (_patchResults.length === 0 && <mod guard> && model) { ... }
-        t.ifStatement(
-          t.logicalExpression(
-            "&&",
-            t.logicalExpression(
-              "&&",
-              t.binaryExpression(
-                "===",
-                t.memberExpression(t.identifier("_patchResults"), t.identifier("length")),
-                t.numericLiteral(0)
-              ),
-              buildModGuard(MOD_ID)
-            ),
-            t.identifier("model")
-          ),
-          t.blockStatement([
-            // let _patchEffort = effort !== undefined ? effort : <settings getter>;
-            // Primary source is the passed per-turn effortValue (covers max + /effort
-            // + --effort); the settings getter is a fallback for when effortValue is unset.
-            t.variableDeclaration("let", [
-              t.variableDeclarator(
-                t.identifier("_patchEffort"),
-                t.conditionalExpression(
-                  t.binaryExpression("!==", t.identifier("effort"), t.identifier("undefined")),
-                  t.identifier("effort"),
-                  buildEffortGetterCall(effortGetterFn, effortGetterParams, settingsGetterFn)
-                )
-              ),
-            ]),
-            // if (_patchEffort && !effortSupportFn(model)) { push ... }
-            t.ifStatement(
-              t.logicalExpression(
-                "&&",
-                t.identifier("_patchEffort"),
-                t.unaryExpression(
-                  "!",
-                  t.callExpression(t.identifier(effortSupportFn), [t.identifier("model")])
-                )
-              ),
-              t.blockStatement([
-                t.expressionStatement(
-                  t.callExpression(
-                    t.memberExpression(t.identifier("_patchResults"), t.identifier("push")),
-                    [
-                      t.objectExpression([
-                        t.objectProperty(t.identifier("type"), t.stringLiteral("ultrathink_effort")),
-                        t.objectProperty(t.identifier("level"), t.identifier("_patchEffort")),
-                      ]),
-                    ]
-                  )
-                ),
-              ])
-            ),
-          ])
-        ),
-        // return _patchResults;
-        t.returnStatement(t.identifier("_patchResults")),
-      ];
-
-      funcPath.node.body = t.blockStatement(newBody);
-      bodyChanged += 1;
-    },
-
-    // Transform call site: f2Y(q) → f2Y(q, K.options.mainLoopModel, K.getAppState().effortValue)
-    // Walk up from call site through enclosing functions until one contains mainLoopModel.
-    CallExpression(callPath) {
-      if (!t.isIdentifier(callPath.node.callee, { name: ultrathinkFn })) return;
-      if (callPath.node.arguments.length !== 1) return;
-
-      // First call site: discover mainLoopModel expression from ancestors
-      if (!mainLoopModelExpr) {
-        let current = callPath.parentPath;
-        while (current) {
-          if (t.isFunction(current.node)) {
-            // Scoped traverse — walks only this ancestor function, not the full AST
-            traverse(current.node, {
-              MemberExpression(memPath) {
-                if (mainLoopModelExpr) return;
-                if (
-                  !memPath.node.computed &&
-                  t.isIdentifier(memPath.node.property, { name: "mainLoopModel" }) &&
-                  t.isMemberExpression(memPath.node.object) &&
-                  !memPath.node.object.computed &&
-                  t.isIdentifier(memPath.node.object.property, { name: "options" }) &&
-                  t.isIdentifier(memPath.node.object.object)
-                ) {
-                  mainLoopModelExpr = memPath.node;
-                }
-              },
-            }, current.scope);
-            if (mainLoopModelExpr) break;
-          }
-          current = current.parentPath;
-        }
-      }
-
-      // Apply: add mainLoopModel argument, then effortValue argument.
-      // effortValue = <base>.getAppState().effortValue where <base> is the same query
-      // object the .options.mainLoopModel access is rooted on (mainLoopModelExpr.object.object).
-      // That object carries getAppState() — confirmed by sibling accessors mY(H)/aI6(H)
-      // which read H.getAppState().effortValue / .ultracode alongside H.options.mainLoopModel.
-      if (!mainLoopModelExpr) return;
-      callPath.node.arguments.push(t.cloneNode(mainLoopModelExpr, true));
-      const baseObj = t.cloneNode(mainLoopModelExpr.object.object, true);
-      callPath.node.arguments.push(
-        t.memberExpression(
-          t.callExpression(
-            t.memberExpression(baseObj, t.identifier("getAppState")),
-            []
-          ),
-          t.identifier("effortValue")
-        )
+    if (!settingsGetterFn) {
+      throw new Error(
+        `Effort getter ${effortGetterFn} takes a state argument (${effortGetterParams} params) but ` +
+        `no canonical call site ({..., settings: <getter>()}) was found to derive the settings getter. ` +
+        `Refusing to emit a bare call that would crash at runtime.`
       );
-      callSiteChanged += 1;
-    },
-  });
-
-  if (bodyChanged !== 1) {
-    throw new Error(`Expected to patch exactly one ultrathink detector function, patched ${bodyChanged}.`);
+    }
   }
-  if (!mainLoopModelExpr) {
+
+  console.error(`Discovered: ultra=${ultraFn}, effortGetter=${effortGetterFn} (${effortGetterParams} params), effortSupport=${effortSupportFn}, settingsGetter=${settingsGetterFn || "n/a"}`);
+
+  // --- Transform 1: Modify ultrathink detector function ---
+
+  let effortGetterCall;
+  if (effortGetterParams === 0) {
+    effortGetterCall = `${effortGetterFn}()`;
+  } else {
+    effortGetterCall = `${effortGetterFn}({ cli: {}, env: process.env, settings: ${settingsGetterFn}() })`;
+  }
+
+  const modGuard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")`;
+
+  // Replace function signature
+  const oldSig = `function ${ultraFn}(${ultraParam}) {`;
+  const newSig = `function ${ultraFn}(${ultraParam}, model, effort) {`;
+  if (!code.includes(oldSig)) {
+    throw new Error(`Could not find function declaration for ${ultraFn}`);
+  }
+  code = code.replace(oldSig, newSig);
+
+  // Find the return statement containing type: "ultrathink_effort"
+  const returnPattern = /return\s*\[\s*\{\s*type:\s*"ultrathink_effort"[\s\S]*?\}\s*\]\s*;/;
+  const returnMatch = returnPattern.exec(code);
+  if (!returnMatch) {
+    throw new Error("Could not find the return statement in the ultrathink detector");
+  }
+
+  const arrayContent = returnMatch[0].replace(/^return\s*/, "").replace(/;\s*$/, "");
+
+  const newBody = `var _patchResults = [];
+  var _patchEffort = effort !== undefined ? effort : ${effortGetterCall};
+  if (${modGuard}) {
+    _patchResults.push({ type: "extended_thinking", level: _patchEffort, model: model });
+    if (${effortSupportFn}(model)) {
+      _patchResults.push(...${arrayContent});
+    }
+  }
+  _patchResults.push(...${arrayContent});
+  return _patchResults;`;
+
+  code = code.substring(0, returnMatch.index) + newBody + code.substring(returnMatch.index + returnMatch[0].length);
+
+  // --- Transform 2: Modify call site ---
+
+  // Find the context variable with .options.mainLoopModel
+  // The call site is in the same function as the mainLoopModel access.
+  // Find each occurrence of .options.mainLoopModel and check if the enclosing
+  // function block also contains a call to ultraFn.
+  const ctxPattern = /([\w$]+)\.options\.mainLoopModel/g;
+  let ctxVar = null;
+  let m;
+  while ((m = ctxPattern.exec(code)) !== null) {
+    // Find the containing function block
+    let funcBraceStart = -1;
+    let depth = 0;
+    for (let i = m.index; i >= 0; i--) {
+      if (code[i] === '}') depth++;
+      if (code[i] === '{') { if (depth === 0) { funcBraceStart = i; break; } depth--; }
+    }
+    if (funcBraceStart === -1) continue;
+
+    // Walk outward: the mainLoopModel might be inside a nested function,
+    // so we need to check each enclosing function level
+    let checkPos = funcBraceStart;
+    while (checkPos >= 0) {
+      // Find the function-level block containing this brace
+      let fnBraceStart = -1;
+      depth = 0;
+      for (let i = checkPos; i >= 0; i--) {
+        if (code[i] === '}') depth++;
+        if (code[i] === '{') { if (depth === 0) { fnBraceStart = i; break; } depth--; }
+      }
+      if (fnBraceStart === -1) break;
+
+      // Check if this is a function body (has function/=> before the brace)
+      const before = code.substring(Math.max(0, fnBraceStart - 200), fnBraceStart);
+      if (/function\s*[\w$]*\s*\([^)]*\)\s*$/.test(before) || /=>\s*$/.test(before)) {
+        // Find the matching closing brace
+        let fnBraceEnd = -1;
+        depth = 1;
+        for (let i = fnBraceStart + 1; i < code.length; i++) {
+          if (code[i] === '{') depth++;
+          if (code[i] === '}') { depth--; if (depth === 0) { fnBraceEnd = i; break; } }
+        }
+        if (fnBraceEnd !== -1) {
+          const fnBlock = code.substring(fnBraceStart, fnBraceEnd + 1);
+          if (fnBlock.includes(ultraFn + "(") || fnBlock.includes(ultraFn + " (")) {
+            ctxVar = m[1];
+            break;
+          }
+        }
+        break; // Don't keep walking up — we found the function level
+      }
+      // Not a function brace — walk outward
+      checkPos = fnBraceStart - 1;
+    }
+    if (ctxVar) break;
+  }
+
+  if (!ctxVar) {
     throw new Error("Could not find X.options.mainLoopModel reference in call site scope");
   }
-  if (callSiteChanged !== 1) {
-    throw new Error(`Expected exactly one call site for ${ultrathinkFn}, found ${callSiteChanged}.`);
+
+  // Replace the call: ultraFn(param) → ultraFn(param, ctxVar.options.mainLoopModel, ctxVar.getAppState().effortValue)
+  const callPattern = new RegExp(`${escapeRegex(ultraFn)}\\s*\\(([\\w$]+)\\)`, "g");
+  let callReplaced = false;
+  code = code.replace(callPattern, (match, arg) => {
+    if (callReplaced) return match;
+    callReplaced = true;
+    return `${ultraFn}(${arg}, ${ctxVar}.options.mainLoopModel, ${ctxVar}.getAppState().effortValue)`;
+  });
+
+  if (!callReplaced) {
+    throw new Error(`Expected exactly one call site for ${ultraFn}, found none.`);
   }
 
-  console.error(`Discovered mainLoopModel context object: ${mainLoopModelExpr.object.object.name}`);
+  console.error(`Discovered mainLoopModel context object: ${ctxVar}`);
 
-  return bodyChanged + callSiteChanged;
+  return { code, changed: 2 };
 }
 
-
-
-
-
+/** CLI wrapper */
 function main() {
   const [, , inputFile, outputFile] = process.argv;
   if (!inputFile) {
@@ -413,28 +311,15 @@ function main() {
 
   const code = fs.readFileSync(inputPath, "utf8");
 
-  let ast;
+  let result;
   try {
-    ast = parser.parse(code, {
-      sourceType: "unambiguous",
-      plugins: ["jsx", "typescript"],
-    });
-  } catch (err) {
-    console.error(`Error: Failed to parse input file: ${err.message}`);
-    process.exit(1);
-  }
-
-  let totalChanges;
-  try {
-    totalChanges = transform(ast);
+    result = transform(code);
   } catch (err) {
     console.error(`Error: ${err.message}`);
     process.exit(1);
   }
 
-  console.error(`Patched ${totalChanges} location(s) (function body + call site).`);
-
-  const output = generate(ast, { retainLines: false }, code).code;
+  console.error(`Patched ${result.changed} location(s) (function body + call site).`);
 
   if (outputFile) {
     const outputPath = path.resolve(outputFile);
@@ -442,9 +327,9 @@ function main() {
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
     }
-    fs.writeFileSync(outputPath, output, "utf8");
+    fs.writeFileSync(outputPath, result.code, "utf8");
   } else {
-    process.stdout.write(output);
+    process.stdout.write(result.code);
   }
 }
 

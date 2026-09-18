@@ -58,21 +58,16 @@ describe("codemod-set-memory-limits", () => {
   });
 
   it("is idempotent — already-patched code is a no-op", { timeout: TIMEOUT }, () => {
-    // The codemod's isAlreadyApplied scans for __getModConfig__("set_memory_limits".
     const once = runCodemod(FULL);
-    // Re-running on the already-patched output should make no further changes (the
-    // isAlreadyApplied guard returns 0). Verify via the transform export directly.
     const { transform } = require(CODEMOD_PATH);
-    const parser = require(path.join(process.cwd(), "codemods/node_modules/@babel/parser"));
-    const ast = parser.parse(once, { sourceType: "unambiguous", plugins: ["jsx", "typescript"] });
-    expect(transform(ast, once)).toBe(0);
+    const result = transform(once);
+    expect(result.changed).toBe(0);
   });
 
   it("returns no changes for unrelated code", { timeout: TIMEOUT }, () => {
     const { transform } = require(CODEMOD_PATH);
-    const parser = require(path.join(process.cwd(), "codemods/node_modules/@babel/parser"));
     const code = "const x = 42;\nconsole.log(x);\n";
-    const ast = parser.parse(code, { sourceType: "unambiguous", plugins: ["jsx", "typescript"] });
-    expect(transform(ast, code)).toBe(0);
+    const result = transform(code);
+    expect(result.changed).toBe(0);
   });
 });

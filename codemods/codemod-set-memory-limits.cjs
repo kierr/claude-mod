@@ -2,310 +2,178 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
-/**
- * Build AST node for: __getModConfig__("set_memory_limits", key) ?? defaultNode
- * Disabled -> undefined ?? defaultNode -> defaultNode (original); enabled+set -> value;
- * enabled+absent -> defaultNode (RESET); enabled+"" -> "" (CLEAR). mods.json stores real
- * numbers, so no parseInt.
- */
-function buildCfg(key, defaultNode) {
-  return t.logicalExpression("??",
-    t.callExpression(t.identifier("__getModConfig__"), [t.stringLiteral("set_memory_limits"), t.stringLiteral(key)]),
-    defaultNode
-  );
+const MOD_ID = "set_memory_limits";
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * Check if a TemplateLiteral contains the given text fragments in its quasis.
+ * 7 transforms for memory configuration:
+ * 1. max_lines: `var X = 200;` used in template `first ${X} lines`
+ * 2. max_bytes: `var X = 4096;` used in template `...${X} byte limit`
+ * 3. max_files: `var X = 200;` used in .slice(0, X) with mtimeMs context
+ * 4. max_files_structured: `var X = 500;` used in .slice(0, COND ? X : Y) with mtimeMs
+ * 5. max_recall: .slice(0, 5) with .has( context
+ * 6. selector_model: model: CALL() in "memories relevant to" context
+ * 7. selector_max_tokens: max_tokens: 256 in "memories relevant to" context
  */
-function templateLiteralContainsText(node, fragments) {
-  if (!t.isTemplateLiteral(node)) return false;
-
-  const quasiText = node.quasis.map(q => q.value.cooked || "").join(" ");
-  return fragments.every(frag => quasiText.includes(frag));
-}
-
-/**
- * Build a line→character-offset lookup table from source code.
- * O(lines) once, enables O(1) offset lookups thereafter.
- */
-function buildLineOffsetMap(sourceCode) {
-  const map = [0];
-  let offset = 0;
-  for (let i = 0; i < sourceCode.length; i++) {
-    if (sourceCode[i] === "\n") { offset = i + 1; map.push(offset); }
+function transform(code) {
+  // Guard: code must be a string (old Babel callers may pass (ast, code))
+  if (typeof code !== "string") {
+    return { code: "", changed: 0 };
   }
-  return map;
-}
 
-/**
- * Get character offset for a given line/column position using pre-built offset map.
- * O(1) instead of O(line_number) indexOf loop.
- */
-function getOffset(line, column, lineMap) {
-  const base = lineMap[line - 1] ?? 0; // Babel's loc.line is 1-indexed; map is 0-indexed
-  return base + column;
-}
+  // Idempotency
+  if (code.includes('__getModConfig__("set_memory_limits"')) {
+    return { code, changed: 0 };
+  }
 
-/**
- * Check if the containing scope (nearest function or program root) for a path
- * contains text. Uses source-offset substring search on the raw source code
- * instead of generate(), avoiding the cost of code generation from the AST.
- */
-function contextContainsText(path, searchText, sourceCode, lineMap) {
-  let scopePath = path;
-  while (scopePath) {
-    if (scopePath.isFunctionParent() || scopePath.isProgram()) {
-      break;
+  const cfg = (key, def) => `__getModConfig__("${MOD_ID}", "${key}") ?? ${def}`;
+  let count = 0;
+
+  // Transform 1 & 2: Line and byte limits
+  // Find template: `first ${X} lines (or ${Y} byte limit)`
+  const lineBytePattern = /`first \$\{([\w$]+)\} lines \(or \$\{([\w$]+)\} byte limit\)`/g;
+  const lbMatch = lineBytePattern.exec(code);
+  if (lbMatch) {
+    const lineVar = lbMatch[1];
+    const byteVar = lbMatch[2];
+
+    // Replace var lineVar = 200;
+    const lineDecl = new RegExp(`(var\\s+${escapeRegex(lineVar)}\\s*=\\s*)200(\\s*;)`, "g");
+    const newCode = code.replace(lineDecl, `$1${cfg("max_lines", "200")}$2`);
+    if (newCode !== code) { code = newCode; count++; }
+
+    // Replace var byteVar = 4096;
+    const byteDecl = new RegExp(`(var\\s+${escapeRegex(byteVar)}\\s*=\\s*)4096(\\s*;)`, "g");
+    const newCode2 = code.replace(byteDecl, `$1${cfg("max_bytes", "4096")}$2`);
+    if (newCode2 !== code) { code = newCode2; count++; }
+  }
+
+  // Transform 3 & 4: File scan limits
+  // Find .slice(0, ... with mtimeMs context
+  const sliceWithMtime = code.indexOf("mtimeMs");
+  if (sliceWithMtime !== -1) {
+    // Look for .slice(0, COND ? VAR : VAR) within ~500 chars of mtimeMs
+    const window = code.substring(Math.max(0, sliceWithMtime - 500), sliceWithMtime + 500);
+
+    // Pattern B: structuredMode ? IJY : UAY (ternary in .slice)
+    const ternaryPattern = /\.slice\(0,\s*([\w$]+)\s*\?\s*([\w$]+)\s*:\s*([\w$]+)\s*\)/g;
+    let tm;
+    while ((tm = ternaryPattern.exec(window)) !== null) {
+      const trueVar = tm[2];
+      const falseVar = tm[3];
+
+      // Find declarations: trueVar = 500, falseVar = 200
+      const trueDecl = new RegExp(`(var\\s+${escapeRegex(trueVar)}\\s*=\\s*)500(\\s*;)`, "g");
+      const newCode3 = code.replace(trueDecl, `$1${cfg("max_files_structured", "500")}$2`);
+      if (newCode3 !== code) { code = newCode3; count++; }
+
+      const falseDecl = new RegExp(`(var\\s+${falseVar}\\s*=\\s*)200(\\s*;)`, "g");
+      const newCode4 = code.replace(falseDecl, `$1${cfg("max_files", "200")}$2`);
+      if (newCode4 !== code) { code = newCode4; count++; }
     }
-    scopePath = scopePath.parentPath;
-  }
-  if (!scopePath || !scopePath.node.loc) return false;
-  const start = scopePath.node.loc.start;
-  const offset = getOffset(start.line, start.column, lineMap);
-  // Search the next ~50KB of source from the scope start
-  const window = sourceCode.substring(offset, Math.min(sourceCode.length, offset + 50000));
-  return window.includes(searchText);
-}
-
-/**
- * Check if we're inside a function that contains the given text.
- * Uses raw source substring search instead of generate().
- */
-function isInFunctionContainingText(path, searchText, sourceCode, lineMap) {
-  let current = path;
-  while (current) {
-    if (current.isFunctionParent()) {
-      if (current.node.loc) {
-        const start = current.node.loc.start;
-        const offset = getOffset(start.line, start.column, lineMap);
-        const window = sourceCode.substring(offset, Math.min(sourceCode.length, offset + 50000));
-        if (window.includes(searchText)) return true;
-      }
-      break;
-    }
-    current = current.parentPath;
-  }
-  return false;
-}
-
-/**
- * Check if this codemod has already been applied by scanning for our injected
- * __getModConfig__ marker. Avoids generating the entire ~600K-line AST to check.
- */
-function isAlreadyApplied(sourceCode) {
-  return sourceCode.includes('__getModConfig__("set_memory_limits"');
-}
-
-/**
- * Main transform: applies all 7 memory configuration transforms.
- */
-function transform(ast, sourceCode) {
-  // Idempotency check: if any of our env vars are already present, skip
-  if (isAlreadyApplied(sourceCode)) {
-    return 0;
   }
 
-  let changes = 0;
-
-  // Track processed declarations to avoid double-processing
-  const processedDeclarations = new Set();
-
-  const lineMap = buildLineOffsetMap(sourceCode);
-
-  traverse(ast, {
-    // Transform 1 & 2: Line and byte limits (200 and 4096)
-    // Matcher: Find TemplateLiteral where quasis contain "first " and " lines"
-    TemplateLiteral(path) {
-      if (!templateLiteralContainsText(path.node, ["first ", " lines"])) return;
-
-      // Find the expression between "first " and " lines" — that's the line limit variable
-      const lineLimitExpr = path.node.expressions[0];
-      if (t.isIdentifier(lineLimitExpr)) {
-        const binding = path.scope.getBinding(lineLimitExpr.name);
-        if (binding && binding.path.isVariableDeclarator()) {
-          const decl = binding.path.node;
-          if (decl.init && t.isNumericLiteral(decl.init) && decl.init.value === 200) {
-            const declPath = binding.path;
-            if (!processedDeclarations.has(declPath)) {
-              decl.init = buildCfg("max_lines", t.numericLiteral(200));
-              processedDeclarations.add(declPath);
-              changes++;
-            }
-          }
-        }
-      }
-
-      // In the same template, find byte limit: second expression
-      if (path.node.expressions.length >= 2) {
-        const byteLimitExpr = path.node.expressions[1];
-        if (t.isIdentifier(byteLimitExpr)) {
-          const binding = path.scope.getBinding(byteLimitExpr.name);
-          if (binding && binding.path.isVariableDeclarator()) {
-            const decl = binding.path.node;
-            if (decl.init && t.isNumericLiteral(decl.init) && decl.init.value === 4096) {
-              const declPath = binding.path;
-              if (!processedDeclarations.has(declPath)) {
-                decl.init = buildCfg("max_bytes", t.numericLiteral(4096));
-                processedDeclarations.add(declPath);
-                changes++;
-              }
-            }
-          }
-        }
-      }
-    },
-
-    // Transform 3 & 5: File scan limits (200/500) and recall limit (5)
-    // Both use .slice(0, ...) patterns
-    CallExpression(path) {
-      // Match .slice(0, ...)
-      if (
-        !t.isMemberExpression(path.node.callee) ||
-        !t.isIdentifier(path.node.callee.property, { name: "slice" }) ||
-        path.node.arguments.length !== 2 ||
-        !t.isNumericLiteral(path.node.arguments[0], { value: 0 })
-      ) {
-        return;
-      }
-
-      const sliceArg = path.node.arguments[1];
-
-      // Transform 3: File scan limits (200 and 500)
-      // Matcher: Find .slice(0, X) or .slice(0, _ ? X : Y) in memory scanning context
-      if (contextContainsText(path, "mtimeMs", sourceCode, lineMap)) {
-        // Case A: direct identifier limit.
-        if (t.isIdentifier(sliceArg)) {
-          const binding = path.scope.getBinding(sliceArg.name);
-          if (binding && binding.path.isVariableDeclarator()) {
-            const decl = binding.path.node;
-            if (decl.init && t.isNumericLiteral(decl.init)) {
-              const val = decl.init.value;
-              const declPath = binding.path;
-              if (val === 200 && !processedDeclarations.has(declPath)) {
-                decl.init = buildCfg("max_files", t.numericLiteral(200));
-                processedDeclarations.add(declPath);
-                changes++;
-              }
-            }
-          }
-        }
-
-        // Case B: conditional identifier limit.
-        if (t.isConditionalExpression(sliceArg)) {
-          const consequent = sliceArg.consequent;
-          const alternate = sliceArg.alternate;
-
-          if (t.isIdentifier(consequent)) {
-            const binding = path.scope.getBinding(consequent.name);
-            if (binding && binding.path.isVariableDeclarator()) {
-              const decl = binding.path.node;
-              if (decl.init && t.isNumericLiteral(decl.init) && decl.init.value === 500) {
-                const declPath = binding.path;
-                if (!processedDeclarations.has(declPath)) {
-                  decl.init = buildCfg("max_files_structured", t.numericLiteral(500));
-                  processedDeclarations.add(declPath);
-                  changes++;
-                }
-              }
-            }
-          }
-
-          if (t.isIdentifier(alternate)) {
-            const binding = path.scope.getBinding(alternate.name);
-            if (binding && binding.path.isVariableDeclarator()) {
-              const decl = binding.path.node;
-              if (decl.init && t.isNumericLiteral(decl.init) && decl.init.value === 200) {
-                const declPath = binding.path;
-                if (!processedDeclarations.has(declPath)) {
-                  decl.init = buildCfg("max_files", t.numericLiteral(200));
-                  processedDeclarations.add(declPath);
-                  changes++;
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // Transform 5: .slice(0, 5) recall limit
-      // Matcher: Find .slice(0, 5) preceded by .filter in a chain containing .has
-      if (t.isNumericLiteral(sliceArg, { value: 5 })) {
-        if (contextContainsText(path, ".has(", sourceCode, lineMap)) {
-          path.node.arguments[1] = buildCfg("max_recall", t.numericLiteral(5));
-          changes++;
-        }
-      }
-    },
-
-    // Transform 4: "up to 5" prompt
-    // Matcher: Find StringLiteral containing "up to 5"
-    StringLiteral(path) {
-      if (path.node.value.includes("up to 5")) {
-        // Replace "up to 5" with "up to ${env || 5}" while preserving the rest of the string
-        const value = path.node.value;
-        const idx = value.indexOf("up to 5");
-        const before = value.slice(0, idx);
-        const after = value.slice(idx + 7); // length of "up to 5"
-
-        // Replace first occurrence only, preserving the rest
-        const newTemplate = t.templateLiteral(
-          [
-            t.templateElement({ raw: before + "up to ", cooked: before + "up to " }, false),
-            t.templateElement({ raw: after, cooked: after }, true)
-          ],
-          [
-            buildCfg("max_recall", t.stringLiteral("5"))
-          ]
-        );
-        path.replaceWith(newTemplate);
-        changes++;
-      }
-    },
-
-    // Transform 6 & 7: Selector model and max_tokens
-    // Both are in the same selector function context
-    ObjectProperty(path) {
-      // Check if we're in the selector function context
-      // Look for "memories relevant to" which is in the prompt string
-      if (!isInFunctionContainingText(path, "memories relevant to", sourceCode, lineMap)) {
-        return;
-      }
-
-      // Transform 6: Selector model
-      // Matcher: Find ObjectProperty with key "model" where value is a CallExpression (no arguments)
-      if (
-        t.isIdentifier(path.node.key, { name: "model" }) &&
-        t.isCallExpression(path.node.value) &&
-        path.node.value.arguments.length === 0
-      ) {
-        const originalCall = path.node.value;
-        path.node.value = buildCfg("selector_model", originalCall);
-        changes++;
-      }
-
-      // Transform 7: max_tokens: 256
-      // Matcher: Find ObjectProperty with key "max_tokens" and value NumericLiteral(256)
-      if (
-        t.isIdentifier(path.node.key, { name: "max_tokens" }) &&
-        t.isNumericLiteral(path.node.value, { value: 256 })
-      ) {
-        path.node.value = buildCfg("selector_max_tokens", t.numericLiteral(256));
-        changes++;
+  // Transform 5: Recall limit (.slice(0, 5) with .has( context)
+  const hasIdx = code.indexOf(".has(");
+  if (hasIdx !== -1) {
+    // Search for .slice(0, 5) near .has(
+    const recallWindow = code.substring(Math.max(0, hasIdx - 300), hasIdx + 300);
+    const recallSliceMatch = recallWindow.match(/\.slice\(0,\s*5\s*\)/);
+    if (recallSliceMatch) {
+      // Find the absolute position in the full code
+      const absPos = code.indexOf(".slice(0, 5)", Math.max(0, hasIdx - 300));
+      if (absPos !== -1) {
+        code = code.substring(0, absPos) + `.slice(0, ${cfg("max_recall", "5")})` + code.substring(absPos + ".slice(0, 5)".length);
+        count++;
       }
     }
-  });
+  }
 
-  return changes;
+  // Transform 4: "up to 5" prompt string
+  const upToIdx = code.indexOf("up to 5");
+  if (upToIdx !== -1) {
+    code = code.substring(0, upToIdx) +
+      `up to \${${cfg("max_recall", '"5"')}} ` +
+      code.substring(upToIdx + 8);  // "up to 5" is 8 chars; add trailing space
+    count++;
+  }
+
+  // Transforms 6 & 7: Selector model and max_tokens
+  // Both are in a function containing "memories relevant to"
+  const memRelevantIdx = code.indexOf("memories relevant to");
+  if (memRelevantIdx !== -1) {
+    // Find the containing function block
+    let funcBraceStart = -1;
+    let depth = 0;
+    for (let i = memRelevantIdx; i >= 0; i--) {
+      if (code[i] === '}') depth++;
+      if (code[i] === '{') { if (depth === 0) { funcBraceStart = i; break; } depth--; }
+    }
+    if (funcBraceStart !== -1) {
+      let funcBraceEnd = -1;
+      depth = 1;
+      for (let i = funcBraceStart + 1; i < code.length; i++) {
+        if (code[i] === '{') depth++;
+        if (code[i] === '}') { depth--; if (depth === 0) { funcBraceEnd = i; break; } }
+      }
+      if (funcBraceEnd !== -1) {
+        const funcBlock = code.substring(funcBraceStart, funcBraceEnd + 1);
+
+        // Transform 6: model: CALL() → model: __getModConfig__(...) ?? CALL()
+        const modelPattern = /model:\s*([\w$]+)\(\)/g;
+        let modelMatch;
+        let newFuncBlock = funcBlock;
+        while ((modelMatch = modelPattern.exec(funcBlock)) !== null) {
+          const callExpr = `${modelMatch[1]}()`;
+          newFuncBlock = newFuncBlock.replace(
+            `model: ${callExpr}`,
+            `model: ${cfg("selector_model", callExpr)}`
+          );
+        }
+        if (newFuncBlock !== funcBlock) {
+          code = code.substring(0, funcBraceStart) + newFuncBlock + code.substring(funcBraceEnd + 1);
+          count++;
+        }
+
+        // Transform 7: max_tokens: 256 → max_tokens: __getModConfig__(...) ?? 256
+        // Re-derive the block boundaries since code may have shifted
+        let fbs2 = -1; depth = 0;
+        for (let i = memRelevantIdx; i >= 0; i--) {
+          if (code[i] === '}') depth++;
+          if (code[i] === '{') { if (depth === 0) { fbs2 = i; break; } depth--; }
+        }
+        if (fbs2 !== -1) {
+          let fbe2 = -1; depth = 1;
+          for (let i = fbs2 + 1; i < code.length; i++) {
+            if (code[i] === '{') depth++;
+            if (code[i] === '}') { depth--; if (depth === 0) { fbe2 = i; break; } }
+          }
+          if (fbe2 !== -1) {
+            const block2 = code.substring(fbs2, fbe2 + 1);
+            const maxTokensReplaced = block2.replace(
+              /max_tokens:\s*256\b/,
+              `max_tokens: ${cfg("selector_max_tokens", "256")}`
+            );
+            if (maxTokensReplaced !== block2) {
+              code = code.substring(0, fbs2) + maxTokensReplaced + code.substring(fbe2 + 1);
+              count++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (count === 0) return { code, changed: 0 };
+
+  return { code, changed: count };
 }
 
 /** CLI wrapper */
-
 function main() {
   const [, , inputFile, outputFile] = process.argv;
   if (!inputFile) {
@@ -316,20 +184,13 @@ function main() {
   const inputPath = path.resolve(inputFile);
   const code = fs.readFileSync(inputPath, "utf8");
 
-  const ast = parser.parse(code, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
+  const { code: output, changed } = transform(code);
 
-  const changeCount = transform(ast, code);
-
-  if (changeCount === 0) {
+  if (changed === 0) {
     console.error("No matching memory limit patterns found; nothing changed.");
   } else {
-    console.error(`Applied ${changeCount} memory configuration change(s).`);
+    console.error(`Applied ${changed} memory configuration change(s).`);
   }
-
-  const output = generate(ast, { retainLines: false }, code).code;
 
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");

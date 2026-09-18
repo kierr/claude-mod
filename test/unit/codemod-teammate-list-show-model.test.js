@@ -1,7 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import fs from "fs";
 import path from "path";
-import { randomUUID } from "crypto";
 
 const CODEMOD_PATH = path.join(
   process.cwd(),
@@ -10,23 +8,10 @@ const CODEMOD_PATH = path.join(
 
 const TIMEOUT = 30000;
 
-const CODEMODS_DIR = path.join(process.cwd(), "codemods");
-function babelRequire(pkg) {
-  const p = path.join(CODEMODS_DIR, "node_modules", "@babel", pkg);
-  try { return require(p); } catch { return require("@babel/" + pkg); }
-}
-const parser = babelRequire("parser");
-const generate = babelRequire("generator").default;
-
 function transformViaImport(inputCode) {
   const { transform } = require(CODEMOD_PATH);
-  const ast = parser.parse(inputCode, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
-  const n = transform(ast);
-  const code = generate(ast, { retainLines: false }, inputCode).code;
-  return { code, changed: n };
+  const result = transform(inputCode);
+  return result;
 }
 
 /**

@@ -1,28 +1,30 @@
 import { describe, it, expect } from "bun:test";
-import path from "path";
 import { transform } from "../../codemods/codemod-display-model-name.cjs";
-
-const parser = require(path.join(process.cwd(), "codemods/node_modules/@babel/parser"));
 
 const TIMEOUT = 30000;
 
 describe("codemod-display-model-name (wrapper)", () => {
-  it("chains four Babel sub-codemods on shared AST", () => {
-    // Sub-codemods require specific AST shapes (mainLoopModel + mainLoopModelForSession)
-    // that minimal fixtures don't provide — they throw on mismatch.
+  it("returns changed: 0 when sub-codemods can't find their targets (regex contract)", () => {
     const code = `
       function showModel() {
         return "claude-sonnet-4-6";
       }
     `;
-    const ast = parser.parse(code);
-    expect(() => transform(ast, code)).toThrow();
+    // Regex contract: transform(code) — sub-codemods gracefully skip on missing anchors
+    const result = transform(code);
+    expect(result.changed).toBe(0);
   });
 
-  it("throws when sub-codemods can't find their targets", () => {
+  it("returns changed: 0 on trivial input (regex contract)", () => {
     const code = "var x = 42;";
-    const ast = parser.parse(code);
-    expect(() => transform(ast, code)).toThrow();
+    const result = transform(code);
+    expect(result.changed).toBe(0);
+  });
+
+  it("always returns { code, changed } object (regex contract)", () => {
+    const code = "var x = 42;";
+    const result = transform(code);
+    expect(result).toEqual({ code, changed: 0 });
   });
 
   it("exports transform as a function", () => {

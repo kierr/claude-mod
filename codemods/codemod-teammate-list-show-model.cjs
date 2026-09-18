@@ -2,199 +2,115 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 const MOD_ID = "display_model_name";
 
-/**
- * Inject model badge into the KDK teammate row component.
- *
- * Strategy: find the createElement call for the daO subcomponent (identifiable
- * by its props: teammate, allIdle, pastTenseVerb, displayTime). Then find the
- * tool-use-count createElement immediately after it (contains "tool " and "uses"
- * string children). Insert a new model badge element between them.
- *
- * The injected element: H.model && createElement(N, { dimColor: true }, " · ", H.model)
- * — conditional rendering via logical AND, dimmed, with a middot separator.
- */
-function transform(ast) {
-  let changed = 0;
-
-  // Step 1: Find KDK by its unique destructured prop set
-  let kdkDestructurePath = null;
-  let teammateAlias = null;
-  let createElementVar = null;
-  let textCompVar = null;
-
-  traverse(ast, {
-    FunctionDeclaration(funcPath) {
-      if (kdkDestructurePath) return;
-
-      const params = funcPath.node.params;
-      if (params.length !== 1) return;
-      const param = params[0];
-      if (!t.isObjectPattern(param)) return;
-
-      // Check for all six props: teammate, isLast, isSelected, isForegrounded, allIdle, showPreview
-      const propNames = new Set();
-      for (const prop of param.properties) {
-        if (t.isObjectProperty(prop) && t.isIdentifier(prop.key)) {
-          propNames.add(prop.key.name);
-        }
-      }
-
-      const required = ["teammate", "isLast", "isSelected", "isForegrounded", "allIdle", "showPreview"];
-      if (!required.every(name => propNames.has(name))) return;
-
-      // Find the teammate alias (e.g., teammate: H)
-      for (const prop of param.properties) {
-        if (t.isObjectProperty(prop) && t.isIdentifier(prop.key, { name: "teammate" }) && t.isIdentifier(prop.value)) {
-          teammateAlias = prop.value.name;
-        }
-      }
-
-      if (!teammateAlias) return;
-
-      // Idempotency: skip if already patched
-      const funcCode = generate(funcPath.node).code;
-      if (funcCode.includes('__isModEnabled__("display_model_name")') && funcCode.includes(`${teammateAlias}.model`)) return;
-
-      kdkDestructurePath = funcPath;
-      funcPath.stop();
-    },
-  });
-
-  if (!kdkDestructurePath) return changed;
-
-  // Step 2: Extract createElement and Text component names from the function body
-  kdkDestructurePath.traverse({
-    CallExpression(callPath) {
-      if (createElementVar && textCompVar) return;
-
-      const callee = callPath.node.callee;
-      if (!t.isMemberExpression(callee) || !t.isIdentifier(callee.property, { name: "createElement" })) return;
-      if (!t.isIdentifier(callee.object)) return;
-
-      if (!createElementVar) createElementVar = callee.object.name;
-
-      // Find the Text component: used in dimColor elements
-      for (let i = 0; i < callPath.node.arguments.length; i++) {
-        const arg = callPath.node.arguments[i];
-        if (!t.isIdentifier(arg)) continue;
-        const nextArg = callPath.node.arguments[i + 1];
-        if (!t.isObjectExpression(nextArg)) continue;
-
-        const hasDimColor = nextArg.properties.some(p =>
-          t.isObjectProperty(p) && t.isIdentifier(p.key, { name: "dimColor" })
-        );
-        if (hasDimColor && !textCompVar) {
-          textCompVar = arg.name;
-          break;
-        }
-      }
-    },
-  });
-
-  if (!createElementVar || !textCompVar) return changed;
-
-  // Step 3: Find the daO createElement call and inject model badge after it
-  kdkDestructurePath.traverse({
-    CallExpression(callPath) {
-      if (changed > 0) return;
-
-      // Match: createElement(daO, { teammate, allIdle, pastTenseVerb, displayTime, ... })
-      const callee = callPath.node.callee;
-      if (!t.isMemberExpression(callee) || !t.isIdentifier(callee.property, { name: "createElement" })) return;
-      if (callPath.node.arguments.length < 2) return;
-
-      const propsArg = callPath.node.arguments[1];
-      if (!t.isObjectExpression(propsArg)) return;
-
-      // Check for the unique daO prop set
-      const hasTeammate = propsArg.properties.some(p =>
-        t.isObjectProperty(p) && t.isIdentifier(p.key, { name: "teammate" })
-      );
-      const hasPastTenseVerb = propsArg.properties.some(p =>
-        t.isObjectProperty(p) && t.isIdentifier(p.key, { name: "pastTenseVerb" })
-      );
-      const hasDisplayTime = propsArg.properties.some(p =>
-        t.isObjectProperty(p) && t.isIdentifier(p.key, { name: "displayTime" })
-      );
-      const hasActivityText = propsArg.properties.some(p =>
-        t.isObjectProperty(p) && t.isIdentifier(p.key, { name: "activityText" })
-      );
-
-      if (!hasTeammate || !hasPastTenseVerb || !hasDisplayTime || !hasActivityText) return;
-
-      // This is the daO call. Find its parent createElement (the row Box).
-      // The daO call is a child of the row Box createElement. We need to insert
-      // our model element after it in the children array.
-      const parentCall = callPath.parentPath;
-      if (!t.isCallExpression(parentCall.node)) return;
-
-      // Verify parent is a createElement call
-      const parentCallee = parentCall.node.callee;
-      if (!t.isMemberExpression(parentCallee) || !t.isIdentifier(parentCallee.property, { name: "createElement" })) return;
-
-      // Find the index of the daO call in the parent's arguments
-      const parentArgs = parentCall.node.arguments;
-      let daoIdx = -1;
-      for (let i = 0; i < parentArgs.length; i++) {
-        if (parentArgs[i] === callPath.node) {
-          daoIdx = i;
-          break;
-        }
-      }
-
-      if (daoIdx === -1) return;
-
-      // Build the model badge element:
-      // typeof __isModEnabled__ === "function" && __isModEnabled__("display_model_name")
-      //   ? (H.model && createElement(N, { dimColor: true }, " · ", H.model))
-      //   : undefined
-      const modCheck = t.logicalExpression(
-        "&&",
-        t.binaryExpression(
-          "===",
-          t.unaryExpression("typeof", t.identifier("__isModEnabled__")),
-          t.stringLiteral("function")
-        ),
-        t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(MOD_ID)])
-      );
-
-      const modelEl = t.conditionalExpression(
-        modCheck,
-        t.logicalExpression(
-          "&&",
-          t.memberExpression(t.identifier(teammateAlias), t.identifier("model")),
-          t.callExpression(
-            t.memberExpression(t.identifier(createElementVar), t.identifier("createElement")),
-            [
-              t.identifier(textCompVar),
-              t.objectExpression([
-                t.objectProperty(t.identifier("dimColor"), t.booleanLiteral(true)),
-              ]),
-              t.stringLiteral(" · "),
-              t.memberExpression(t.identifier(teammateAlias), t.identifier("model")),
-            ]
-          )
-        ),
-        t.identifier("undefined")
-      );
-
-      // Insert after daO call
-      parentArgs.splice(daoIdx + 1, 0, modelEl);
-      changed++;
-    },
-  });
-
-  return changed;
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** CLI wrapper */
+/**
+ * Inject model badge into the teammate row component.
+ *
+ * Strategy: find createElement calls with { teammate, pastTenseVerb, displayTime, activityText }
+ * props (the daO subcomponent). Insert a model badge element after it:
+ *
+ *   typeof __isModEnabled__ === "function" && __isModEnabled__("display_model_name")
+ *     ? (H.model && CE.createElement(T, { dimColor: true }, " · ", H.model))
+ *     : undefined
+ *
+ * Discovers: teammate alias, createElement var, Text component var from context.
+ */
+function transform(code) {
+  if (typeof code !== "string") return { code: "", changed: 0 };
+
+  // Idempotency: skip if already patched
+  // Idempotency: skip if already patched
+  if (code.includes(`__isModEnabled__("${MOD_ID}")`) && code.includes('.model &&')) {
+    return { code, changed: 0 };
+  }
+
+  // Find the teammate function by its destructured param set:
+  // { teammate: H, isLast: _, isSelected: q, isForegrounded: K, allIdle: O, showPreview: T }
+  // All six must be present in the destructuring.
+  const funcPattern = /function\s+([\w$]+)\s*\(\s*\{[\s\S]*?teammate\s*:[\s]*([\w$]+)[\s\S]*?\}\s*\)\s*\{/g;
+
+  let funcMatch;
+  let teammateAlias = null;
+
+  while ((funcMatch = funcPattern.exec(code)) !== null) {
+    const funcBody = funcMatch[0];
+    const alias = funcMatch[2];
+    // Verify all six required props are present
+    const requiredProps = ["isLast", "isSelected", "isForegrounded", "allIdle", "showPreview"];
+    if (requiredProps.every(p => funcBody.includes(p))) {
+      teammateAlias = alias;
+      break;
+    }
+  }
+
+  if (!teammateAlias) return { code, changed: 0 };
+
+  // Find createElement function name
+  const cePattern = /([\w$]+)\.createElement\s*\(/g;
+  let createElementVar = null;
+  let ceMatch;
+  while ((ceMatch = cePattern.exec(code)) !== null) {
+    createElementVar = ceMatch[1];
+    break;
+  }
+  if (!createElementVar) return { code, changed: 0 };
+
+  // Find the Text component name (used with dimColor)
+  // Pattern: createElement(TEXTCOMP, { dimColor: true }, ...)
+  const textCompPattern = new RegExp(
+    `${escapeRegex(createElementVar)}\\.createElement\\s*\\(\\s*([\\w$]+)\\s*,\\s*\\{\\s*dimColor\\s*:\\s*true`,
+    "g"
+  );
+  let textCompVar = null;
+  let tcMatch;
+  while ((tcMatch = textCompPattern.exec(code)) !== null) {
+    textCompVar = tcMatch[1];
+    break;
+  }
+  if (!textCompVar) return { code, changed: 0 };
+
+  // Find the daO createElement call with { teammate, pastTenseVerb, displayTime, activityText }
+  const daoPattern = new RegExp(
+    `${escapeRegex(createElementVar)}\\.createElement\\s*\\(\\s*[\\w$]+\\s*,\\s*\\{[^}]*teammate[^}]*pastTenseVerb[^}]*displayTime[^}]*activityText[^}]*\\}`,
+    "g"
+  );
+
+  let daoMatch;
+  while ((daoMatch = daoPattern.exec(code)) !== null) {
+    // Find the end of this createElement call (matching closing paren)
+    const callStart = daoMatch.index;
+    let depth = 0;
+    let callEnd = -1;
+    for (let i = callStart; i < code.length; i++) {
+      if (code[i] === '(') depth++;
+      if (code[i] === ')') { depth--; if (depth === 0) { callEnd = i; break; } }
+    }
+    if (callEnd === -1) continue;
+
+    // Build the model badge element
+    const modGuard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")`;
+    const modelBadge = `${modGuard} ? (${teammateAlias}.model && ${createElementVar}.createElement(${textCompVar}, { dimColor: true }, " · ", ${teammateAlias}.model)) : undefined`;
+
+    // Insert after the daO call's closing paren + comma (or just closing paren)
+    const afterCall = code.substring(callEnd, callEnd + 10);
+    if (afterCall.startsWith(",") || afterCall.match(/^\s*,/)) {
+      // Already has a comma — insert before it
+      code = code.substring(0, callEnd) + `, ${modelBadge}` + code.substring(callEnd);
+    } else {
+      code = code.substring(0, callEnd + 1) + `, ${modelBadge}` + code.substring(callEnd + 1);
+    }
+
+    return { code: code, changed: 1 };
+  }
+
+  return { code, changed: 0 };
+}
 
 function main() {
   const [, , inputFile, outputFile] = process.argv;
@@ -204,22 +120,20 @@ function main() {
   }
 
   const inputPath = path.resolve(inputFile);
-  const code = fs.readFileSync(inputPath, "utf8");
-
-  const ast = parser.parse(code, {
-    sourceType: "unambiguous",
-    plugins: ["jsx", "typescript"],
-  });
-
-  const n = transform(ast);
-
-  if (n === 0) {
-    console.error("No matching patterns found; nothing changed.");
-  } else {
-    console.error(`Injected model badge into ${n} teammate row component(s).`);
+  if (!fs.existsSync(inputPath)) {
+    console.error(`Error: Input file not found: ${inputPath}`);
+    process.exit(1);
   }
 
-  const output = generate(ast, { retainLines: false }, code).code;
+  const code = fs.readFileSync(inputPath, "utf8");
+
+  const { code: output, changed } = transform(code);
+
+  if (changed === 0) {
+    console.error("No matching patterns found; nothing changed.");
+  } else {
+    console.error(`Injected model badge into ${changed} teammate row component(s).`);
+  }
 
   if (outputFile) {
     fs.writeFileSync(path.resolve(outputFile), output, "utf8");

@@ -11,7 +11,7 @@ status_tests:
   applicable: 'title: "Plan Mode"'
 codemod:
   type: "node_script"
-  engine: "babel"
+  engine: "regex"
   script: "codemods/codemod-display-short-mode-labels.cjs"
 
 mod:

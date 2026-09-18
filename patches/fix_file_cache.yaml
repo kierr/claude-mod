@@ -12,7 +12,7 @@ status_tests:
 
 codemod:
   type: "node_script"
-  engine: "babel"
+  engine: "regex"
   script: "codemods/codemod-fix-file-cache.cjs"
 
 

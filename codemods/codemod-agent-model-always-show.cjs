@@ -2,229 +2,165 @@
 
 const fs = require("fs");
 const path = require("path");
-const parser = require("@babel/parser");
-const traverse = require("@babel/traverse").default;
-const generate = require("@babel/generator").default;
-const t = require("@babel/types");
 
 const MOD_ID = "display_model_name";
 
-/**
- * Check if a node is: someId.model (non-computed MemberExpression)
- */
-function isQModel(node, expectedObj) {
-  return (
-    t.isMemberExpression(node) &&
-    !node.computed &&
-    t.isIdentifier(node.object, { name: expectedObj }) &&
-    t.isIdentifier(node.property, { name: "model" })
-  );
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * Check if a node is a call: anyFn(anyId.model) — captures callee name.
- * Returns the callee identifier name, or null if no match.
- */
-function matchConverterCall(node, expectedObj) {
-  if (!t.isCallExpression(node) || node.arguments.length !== 1) return null;
-  if (!isQModel(node.arguments[0], expectedObj)) return null;
-  if (!t.isIdentifier(node.callee)) return null;
-  return node.callee.name;
-}
-
-/**
- * Check if a node is a call: anyFn() — captures callee name.
- * Returns the callee identifier name, or null if no match.
- */
-function matchNoArgCall(node) {
-  if (!t.isCallExpression(node) || node.arguments.length !== 0) return null;
-  if (!t.isIdentifier(node.callee)) return null;
-  return node.callee.name;
-}
-
-/**
- * Find the display-model-name function and wrap the model display logic for runtime toggle.
+ * Find the display-model-name function and wrap the model display logic.
  *
- * Matcher: a FunctionDeclaration with exactly 1 identifier param whose body
- * contains an if-statement testing `<param>.model`, with inner variable
- * declarations for a session model getter (no-arg call) and a model converter
- * call (<converter>(<param>.model)), and a nested if checking the two are !==.
+ * The function has this structure:
+ *   function FN(PARAM) {
+ *     let ARR = [];
+ *     if (PARAM.model) {                    // ← wrap with __isModEnabled__
+ *       let A = GETTER();                   // session model getter
+ *       let B = CONVERTER(PARAM.model);     // ← make conditional fallback
+ *       if (B !== A) { ARR.push(...); }     // ← wrap with __isModEnabled__
+ *     }
+ *     if (ARR.length === 0) { return null; }
+ *   }
  *
- * Wraps both the outer `if (<param>.model)` and inner `if (<converted> !== <session>)` with
- * __isModEnabled__ guards so the mod can be toggled at runtime.
+ * Three transformations:
+ * 1. Outer if: PARAM.model → (PARAM.model || __isModEnabled__(...))
+ * 2. Converter call: CONVERTER(PARAM.model) → (PARAM.model ? CONVERTER(PARAM.model) : A)
+ * 3. Inner if: B !== A → (__isModEnabled__(...) || B !== A)
  */
-function transform(ast) {
-  let changed = 0;
+function transform(code) {
+  if (typeof code !== "string") return { code: "", changed: 0 };
 
-  traverse(ast, {
-    FunctionDeclaration(funcPath) {
-      // Match any FunctionDeclaration with exactly 1 identifier param — capture names dynamically
-      if (!t.isIdentifier(funcPath.node.id)) return;
-      if (funcPath.node.params.length !== 1 || !t.isIdentifier(funcPath.node.params[0])) return;
-      const param = funcPath.node.params[0].name;
-
-      const body = funcPath.node.body;
-      if (!t.isBlockStatement(body)) return;
-
-      const stmts = body.body;
-      // Look for pattern: let X = []; if (param.model) { ... }
-      if (stmts.length < 2) return;
-
-      // Find the array declaration: let X = []
-      let arrName = null;
-      for (let i = 0; i < stmts.length; i++) {
-        const s = stmts[i];
-        if (
-          t.isVariableDeclaration(s) && s.declarations.length === 1 &&
-          t.isIdentifier(s.declarations[0].id) &&
-          t.isArrayExpression(s.declarations[0].init) &&
-          s.declarations[0].init.elements.length === 0
-        ) {
-          arrName = s.declarations[0].id.name;
-          break;
-        }
-      }
-      if (!arrName) return;
-
-      // Find the if-statement that tests param.model
-      // Handles both `if (param.model)` and `if (param.model && ...)` patterns
-      let ifPath = null;
-      for (let i = 0; i < stmts.length; i++) {
-        const s = stmts[i];
-        if (!t.isIfStatement(s)) continue;
-        // Direct: if (param.model)
-        if (isQModel(s.test, param)) {
-          ifPath = funcPath.get("body").get("body")[i];
-          break;
-        }
-        // LogicalExpression: if (param.model && ...)
-        if (t.isLogicalExpression(s.test) && s.test.operator === "&&") {
-          if (isQModel(s.test.left, param)) {
-            ifPath = funcPath.get("body").get("body")[i];
-            break;
-          }
-        }
-      }
-      if (!ifPath) return;
-
-      const ifBody = ifPath.node.consequent;
-      if (!t.isBlockStatement(ifBody) || ifBody.body.length !== 3) return;
-
-      // Verify: let <sessionModelVar> = <sessionModelGetter>()
-      const decl1 = ifBody.body[0];
-      if (!t.isVariableDeclaration(decl1) || decl1.declarations.length !== 1) return;
-      if (!t.isIdentifier(decl1.declarations[0].id)) return;
-      const sessionModelVar = decl1.declarations[0].id.name;
-      const decl1Init = decl1.declarations[0].init;
-      const sessionModelGetter = matchNoArgCall(decl1Init);
-      if (!sessionModelGetter) return;
-
-      // Verify: let <convertedVar> = <modelConverter>(param.model)
-      const decl2 = ifBody.body[1];
-      if (!t.isVariableDeclaration(decl2) || decl2.declarations.length !== 1) return;
-      if (!t.isIdentifier(decl2.declarations[0].id)) return;
-      const convertedVar = decl2.declarations[0].id.name;
-      const modelConverter = matchConverterCall(decl2.declarations[0].init, param);
-      if (!modelConverter) return;
-
-      // Verify: nested if (<convertedVar> !== <sessionModelVar>) { <arrName>.push(...) }
-      const nestedIf = ifBody.body[2];
-      if (!t.isIfStatement(nestedIf)) return;
-      const nestedTest = nestedIf.test;
-      if (!t.isBinaryExpression(nestedTest) || nestedTest.operator !== "!==") return;
-      if (!t.isIdentifier(nestedTest.left, { name: convertedVar })) return;
-      if (!t.isIdentifier(nestedTest.right, { name: sessionModelVar })) return;
-
-      // Verify <arrName>.push in the nested if body
-      const nestedBody = t.isBlockStatement(nestedIf.consequent)
-        ? nestedIf.consequent.body
-        : [nestedIf.consequent];
-      if (nestedBody.length !== 1) return;
-      const kPushStmt = nestedBody[0];
-      if (!t.isExpressionStatement(kPushStmt)) return;
-      if (!t.isCallExpression(kPushStmt.expression)) return;
-      const pushCall = kPushStmt.expression;
-      if (!t.isMemberExpression(pushCall.callee)) return;
-      if (!t.isIdentifier(pushCall.callee.object, { name: arrName })) return;
-      if (!t.isIdentifier(pushCall.callee.property, { name: "push" })) return;
-
-      // Verify trailing shape: if (<arrName>.length === 0) { return null; }
-      const hasEmptyReturn = stmts.some(s => {
-        if (
-          !t.isIfStatement(s) ||
-          !t.isBinaryExpression(s.test, { operator: "===" }) ||
-          !t.isMemberExpression(s.test.left) ||
-          !t.isIdentifier(s.test.left.object, { name: arrName }) ||
-          !t.isIdentifier(s.test.left.property, { name: "length" }) ||
-          !t.isNumericLiteral(s.test.right, { value: 0 })
-        ) return false;
-        // Verify consequent is `return null`
-        const conseq = t.isBlockStatement(s.consequent) ? s.consequent.body : [s.consequent];
-        return conseq.length === 1 &&
-          t.isReturnStatement(conseq[0]) &&
-          t.isNullLiteral(conseq[0].argument);
-      });
-      if (!hasEmptyReturn) return;
-
-      // 1. Wrap outer condition: <param>.model → (<param>.model || (typeof __isModEnabled__ === "function" && __isModEnabled__("agent_model_always_show")))
-      // typeof guard prevents ReferenceError if mods_runtime wasn't applied first
-      const outerModCheck = t.logicalExpression(
-        "&&",
-        t.binaryExpression(
-          "===",
-          t.unaryExpression("typeof", t.identifier("__isModEnabled__")),
-          t.stringLiteral("function")
-        ),
-        t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(MOD_ID)])
-      );
-      ifPath.node.test = t.logicalExpression(
-        "||",
-        ifPath.node.test,
-        outerModCheck
-      );
-
-      // 2. Replace <modelConverter>(param.model) with (param.model ? <modelConverter>(param.model) : <sessionModelVar>) for fallback
-      const decl2Path = ifPath.get("consequent").get("body")[1];
-      decl2Path.node.declarations[0].init = t.conditionalExpression(
-        t.memberExpression(t.identifier(param), t.identifier("model")),
-        t.callExpression(t.identifier(modelConverter), [
-          t.memberExpression(t.identifier(param), t.identifier("model")),
-        ]),
-        t.identifier(sessionModelVar)
-      );
-
-      // 3. Wrap inner condition: <converted> !== <session> → ((typeof __isModEnabled__ === "function" && __isModEnabled__(...)) || <converted> !== <session>)
-      // typeof guard prevents ReferenceError if mods_runtime wasn't applied first
-      const innerModCheck = t.logicalExpression(
-        "&&",
-        t.binaryExpression(
-          "===",
-          t.unaryExpression("typeof", t.identifier("__isModEnabled__")),
-          t.stringLiteral("function")
-        ),
-        t.callExpression(t.identifier("__isModEnabled__"), [t.stringLiteral(MOD_ID)])
-      );
-      const nestedIfPath = ifPath.get("consequent").get("body")[2];
-      nestedIfPath.node.test = t.logicalExpression(
-        "||",
-        innerModCheck,
-        nestedIfPath.node.test
-      );
-
-      changed += 1;
-    },
-  });
-
-  if (changed !== 1) {
-    // Skip when no standalone display resolver exists; inline-rendering layouts
-    // need a different match.
-    return 0;
+  // Idempotency: if already patched (our mod-guard pattern is present)
+  if (code.includes(`__isModEnabled__("${MOD_ID}")`) &&
+      /PARAM\.model\s*\|\|/.test(code) === false &&
+      code.includes("display_model_name")) {
+    // More precise check: if both the outer OR and inner OR patterns are present
+    if (/\.model\s*\|\|\s*\(typeof\s+__isModEnabled__/.test(code)) {
+      return { code, changed: 0 };
+    }
   }
 
-  return changed;
-}
+  const modGuard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")`;
 
-/** CLI wrapper */
+  // Step 1: Find the function containing the pattern
+  // Anchor: a function with let ARR = []; if (PARAM.model) { ... }
+  // where the if-body has .push( and .length === 0 and return null
+
+  // Find: if (PARAM.model && ...) or if (PARAM.model)
+  // followed by: .length === 0 ... return null
+  const ifModelPattern = /if\s*\(\s*([\w$]+)\.model\s*(?:&&|\)\s*\{)/g;
+
+  let match;
+  let found = null;
+
+  while ((match = ifModelPattern.exec(code)) !== null) {
+    const paramName = match[1];
+    const ifStart = match.index;
+
+    // Find the enclosing function
+    let funcBraceStart = -1;
+    let depth = 0;
+    for (let i = ifStart; i >= 0; i--) {
+      if (code[i] === '}') depth++;
+      if (code[i] === '{') { if (depth === 0) { funcBraceStart = i; break; } depth--; }
+    }
+    if (funcBraceStart === -1) continue;
+
+    // Find matching closing brace
+    let funcBraceEnd = -1;
+    depth = 1;
+    for (let i = funcBraceStart + 1; i < code.length; i++) {
+      if (code[i] === '{') depth++;
+      if (code[i] === '}') { depth--; if (depth === 0) { funcBraceEnd = i; break; } }
+    }
+    if (funcBraceEnd === -1) continue;
+
+    const funcBlock = code.substring(funcBraceStart, funcBraceEnd + 1);
+
+    // Verify: contains .length === 0 and return null
+    if (!funcBlock.includes(".length === 0")) continue;
+    if (!funcBlock.includes("return null")) continue;
+
+    // Verify: contains .push( after the if (param.model)
+    const ifBody = code.substring(ifStart, ifStart + 500);
+    if (!ifBody.includes(".push(")) continue;
+
+    // Verify: contains !== comparison before .push( — the inner condition
+    // must be a !== check, not === (wrong inner structure)
+    if (!/[\w$]+\s*!==\s*[\w$]+/.test(funcBlock)) continue;
+
+    found = { paramName, ifStart, funcBraceStart, funcBraceEnd };
+    break;
+  }
+
+  if (!found) return { code, changed: 0 };
+
+  const { paramName, ifStart: ifIdx } = found;
+
+  // Step 2: Apply the three transformations
+
+  // Transformation 1: Wrap outer if condition
+  // if (PARAM.model) → if (PARAM.model || (typeof __isModEnabled__ === "function" && __isModEnabled__(...)))
+  // Also handle: if (PARAM.model && ...) → if ((PARAM.model || __isModEnabled__(...)) && ...)
+  const outerCondPattern = new RegExp(`if\\s*\\(\\s*${escapeRegex(paramName)}\\.model(\\s*&&|\\s*\\))`, "g");
+  const outerMatch = outerCondPattern.exec(code);
+  if (!outerMatch) return { code, changed: 0 };
+
+  if (outerMatch[1].trim() === "&&") {
+    // if (PARAM.model && ...) → if ((PARAM.model || __isModEnabled__) && ...)
+    code = code.substring(0, outerMatch.index) +
+      `if ((${paramName}.model || (${modGuard})) &&` +
+      code.substring(outerMatch.index + outerMatch[0].length);
+  } else {
+    // if (PARAM.model) → if (PARAM.model || __isModEnabled__)
+    code = code.substring(0, outerMatch.index) +
+      `if (${paramName}.model || (${modGuard}))` +
+      code.substring(outerMatch.index + outerMatch[0].length);
+  }
+
+  // Transformation 2: Find and modify the converter call
+  // let B = CONVERTER(PARAM.model) → let B = (PARAM.model ? CONVERTER(PARAM.model) : A)
+  // First find: let VAR = CALL(PARAM.model)
+  const converterPattern = new RegExp(
+    `let\\s+([\\w$]+)\\s*=\\s*([\\w$]+)\\(\\s*${escapeRegex(paramName)}\\.model\\s*\\)`,
+    "g"
+  );
+  const converterMatch = converterPattern.exec(code);
+  if (converterMatch) {
+    const convertedVar = converterMatch[1];
+    const converterFn = converterMatch[2];
+
+    // Find the session model variable: let A = GETTER()
+    // Look just before the converter declaration
+    const beforeConverter = code.substring(Math.max(0, converterMatch.index - 200), converterMatch.index);
+    const sessionVarMatch = beforeConverter.match(/let\s+([\w$]+)\s*=\s*([\w$]+)\(\s*\)\s*;?\s*$/);
+
+    if (sessionVarMatch) {
+      const sessionVar = sessionVarMatch[1];
+
+      // Replace: let B = CONVERTER(PARAM.model) → let B = (PARAM.model ? CONVERTER(PARAM.model) : A)
+      const oldDecl = converterMatch[0];
+      const newDecl = `let ${convertedVar} = (${paramName}.model ? ${converterFn}(${paramName}.model) : ${sessionVar})`;
+      code = code.replace(oldDecl, newDecl);
+    }
+  }
+
+  // Transformation 3: Wrap inner if condition
+  // if (B !== A) → if ((__isModEnabled__(...) || B !== A))
+  const innerCondPattern = /if\s*\(\s*([\w$]+)\s*!==\s*([\w$]+)\s*\)\s*\{\s*[\w$]+\.push\(/g;
+  const innerMatch = innerCondPattern.exec(code);
+  if (innerMatch) {
+    const oldCond = innerMatch[0];
+    const newCond = oldCond.replace(
+      /if\s*\(\s*([\w$]+)\s*!==\s*([\w$]+)\)/,
+      `if ((${modGuard}) || $1 !== $2)`
+    );
+    code = code.replace(oldCond, newCond);
+  }
+
+  return { code, changed: 1 };
+}
 
 function main() {
   const [, , inputFile, outputFile] = process.argv;
@@ -235,7 +171,6 @@ function main() {
   }
 
   const inputPath = path.resolve(inputFile);
-
   if (!fs.existsSync(inputPath)) {
     console.error(`Error: Input file not found: ${inputPath}`);
     process.exit(1);
@@ -243,22 +178,13 @@ function main() {
 
   const code = fs.readFileSync(inputPath, "utf8");
 
-  let ast;
-  try {
-    ast = parser.parse(code, {
-      sourceType: "unambiguous",
-      plugins: ["jsx", "typescript"],
-    });
-  } catch (err) {
-    console.error(`Error: Failed to parse input file: ${err.message}`);
-    process.exit(1);
+  const { code: output, changed } = transform(code);
+
+  if (changed === 0) {
+    console.error("No matching agent model display function found; nothing changed.");
+  } else {
+    console.error("Wrapped 1 display-model-name function with __isModEnabled__ guard.");
   }
-
-  // transform() throws if it doesn't match exactly one display-model-name function
-  transform(ast);
-  console.error("Wrapped 1 display-model-name function with __isModEnabled__ guard.");
-
-  const output = generate(ast, { retainLines: false }, code).code;
 
   if (outputFile) {
     const outputPath = path.resolve(outputFile);
