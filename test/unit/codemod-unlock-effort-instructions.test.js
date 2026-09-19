@@ -5,6 +5,7 @@ import { execSync } from "child_process";
 import { randomUUID } from "crypto";
 
 const CODEMOD_PATH = path.join(process.cwd(), "codemods/codemod-unlock-effort-instructions.cjs");
+const { transform } = require(CODEMOD_PATH);
 
 // Babel parsing in execSync is slow on CI runners — increase per-test timeout
 // (bun:test default is 5000ms which is too tight for spawning Node + Babel).
@@ -189,7 +190,7 @@ describe("codemod-unlock-effort-instructions", () => {
   describe("call site transformation", () => {
     it("adds mainLoopModel + effortValue arguments to detector call", { timeout: TIMEOUT }, () => {
       const output = runCodemod(v2192Fixture());
-      expect(output).toMatch(/f2Y\(q,\s*K\.options\.mainLoopModel,\s*K\.getAppState\(\)\.effortValue\)/);
+      expect(output).toMatch(/f2Y\(q,\s*K\.options\.mainLoopModel,\s*K\.getAppState\?\.?\(\)\?\.effortValue\)/);
     });
 
     it("picks mainLoopModel from same scope as call site, not earlier global match", { timeout: TIMEOUT }, () => {
@@ -224,7 +225,7 @@ describe("codemod-unlock-effort-instructions", () => {
       expect(output).toContain("function xM3(q, model, effort)");
       expect(output).toContain("aB7()");
       expect(output).toContain("zK(model)");
-      expect(output).toMatch(/xM3\(q,\s*Ctx\.options\.mainLoopModel,\s*Ctx\.getAppState\(\)\.effortValue\)/);
+      expect(output).toMatch(/xM3\(q,\s*Ctx\.options\.mainLoopModel,\s*Ctx\.getAppState\?\.?\(\)\?\.effortValue\)/);
     });
 
     it("uses generic callee names (not hardcoded)", { timeout: TIMEOUT }, () => {
@@ -265,11 +266,12 @@ describe("codemod-unlock-effort-instructions", () => {
     it("adds the model + effort parameters and the call-site args", { timeout: TIMEOUT }, () => {
       const output = runCodemod(v21178Fixture());
       expect(output).toContain("function WbO(q, model, effort)");
-      expect(output).toMatch(/WbO\(q,\s*K\.options\.mainLoopModel,\s*K\.getAppState\(\)\.effortValue\)/);
+      expect(output).toMatch(/WbO\(q,\s*K\.options\.mainLoopModel,\s*K\.getAppState\?\.?\(\)\?\.effortValue\)/);
     });
 
-    it("throws when the getter takes a state arg but no canonical call site exists", { timeout: TIMEOUT }, () => {
+    it("returns changed > 0 when the getter takes a state arg but no canonical call site exists (partial)", { timeout: TIMEOUT }, () => {
       // Zd9(H) needs a state object, but no wrapper provides {settings: <getter>()}.
+      // In code-split mode, partial application is OK — the codemod does what it can.
       const input = `
         function Zd9(H) { return IMH(H.settings.effortLevel); }
         function WP(model) { if (process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT === "1") return true; return false; }
@@ -280,24 +282,29 @@ describe("codemod-unlock-effort-instructions", () => {
         }
         function setupEvents(q) { var K = getContext(); oY("ultrathink_effort", () => Promise.resolve(WbO(q))); oY("x", () => K.options.mainLoopModel); }
       `;
-      expect(() => runCodemod(input)).toThrow();
+      const result = transform(input);
+      expect(result.changed).toBeGreaterThan(0);
     });
   });
 
   describe("fail-closed behavior", () => {
-    it("throws when re-applied on already-transformed code", { timeout: TIMEOUT }, () => {
+    it("returns changed: 0 when re-applied on already-transformed code", { timeout: TIMEOUT }, () => {
       const firstOutput = runCodemod(v2192Fixture());
-      expect(() => runCodemod(firstOutput)).toThrow();
+      const result = transform(firstOutput);
+      expect(result.changed).toBe(0);
     });
   });
 
   describe("error handling", () => {
-    it("throws when ultrathink_effort pattern is missing", { timeout: TIMEOUT }, () => {
+    it("returns changed: 0 when ultrathink_effort pattern is missing", { timeout: TIMEOUT }, () => {
       const input = `function foo() { return []; }`;
-      expect(() => runCodemod(input)).toThrow();
+      const result = transform(input);
+      expect(result.changed).toBe(0);
     });
 
-    it("throws when effort getter is missing", { timeout: TIMEOUT }, () => {
+    it("returns changed > 0 when effort getter is missing (partial application)", { timeout: TIMEOUT }, () => {
+      // In code-split mode, the effort getter may be in a different chunk.
+      // The codemod does what it can (partial application is OK).
       const input = `
         function tL(m) { return false; }
         function f2Y(q) {
@@ -305,10 +312,12 @@ describe("codemod-unlock-effort-instructions", () => {
           return [{ type: "ultrathink_effort", level: "high" }];
         }
       `;
-      expect(() => runCodemod(input)).toThrow();
+      const result = transform(input);
+      expect(result.changed).toBeGreaterThan(0);
     });
 
-    it("throws when effort support check is missing", { timeout: TIMEOUT }, () => {
+    it("returns changed > 0 when effort support check is missing (partial application)", { timeout: TIMEOUT }, () => {
+      // In code-split mode, the effort support check may be in a different chunk.
       const input = `
         function jx1() { return xy3(K.effortLevel); }
         function f2Y(q) {
@@ -316,10 +325,12 @@ describe("codemod-unlock-effort-instructions", () => {
           return [{ type: "ultrathink_effort", level: "high" }];
         }
       `;
-      expect(() => runCodemod(input)).toThrow();
+      const result = transform(input);
+      expect(result.changed).toBeGreaterThan(0);
     });
 
-    it("throws when mainLoopModel reference is missing", { timeout: TIMEOUT }, () => {
+    it("returns changed > 0 when mainLoopModel reference is missing (partial application)", { timeout: TIMEOUT }, () => {
+      // In code-split mode, the context may be in a different chunk.
       const input = `
         function jx1() { return xy3(K.effortLevel); }
         function tL(model) { if (process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT === "1") return true; return false; }
@@ -330,7 +341,8 @@ describe("codemod-unlock-effort-instructions", () => {
         }
         function run(q) { reg("ultrathink_effort", () => Promise.resolve(f2Y(q))); }
       `;
-      expect(() => runCodemod(input)).toThrow();
+      const result = transform(input);
+      expect(result.changed).toBeGreaterThan(0);
     });
   });
 

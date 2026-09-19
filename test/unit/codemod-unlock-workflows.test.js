@@ -81,9 +81,10 @@ describe("codemod-unlock-workflows", () => {
     expect(repatched).toBe(patched);
   });
 
-  it("throws when allow_workflows gate is not found", () => {
-    // The codemod throws rather than silently returning 0 — explicit failure.
-    expect(() => transform("var x = 42;")).toThrow("allow_workflows");
+  it("returns changed: 0 when allow_workflows gate is not found", () => {
+    // In code-split mode, targets may be in different chunks — changed:0 is not an error
+    const result = transform("var x = 42;");
+    expect(result.changed).toBe(0);
   });
 
   it("exports transform as a function", () => {

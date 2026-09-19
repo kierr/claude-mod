@@ -210,11 +210,18 @@ function transform(code) {
     // Replace Ya("ultrathink_effort", () => Promise.resolve(OUo(e)))
     // with   Ya("ultrathink_effort", () => Promise.resolve(OUo(e, n.options.mainLoopModel, n.getAppState()?.effortValue)))
     const yaArg = yaMatch[1];
-    // Try to find the context variable (n in the example above) from the surrounding code
-    // Look for .options.mainLoopModel in the same function scope
-    const scopeStart = Math.max(0, yaMatch.index - 2000);
+    // Find the enclosing function scope around the Ya() call to avoid
+    // picking up mainLoopModel references from unrelated functions.
+    // Walk backwards from the Ya match to find the nearest 'function' keyword.
+    let fnScopeStart = 0;
+    for (let si = yaMatch.index; si >= Math.max(0, yaMatch.index - 5000); si--) {
+      if (code.substring(si, si + 8) === 'function') {
+        fnScopeStart = si;
+        break;
+      }
+    }
     const scopeEnd = Math.min(code.length, yaMatch.index + 500);
-    const scope = code.substring(scopeStart, scopeEnd);
+    const scope = code.substring(fnScopeStart, scopeEnd);
 
     const mainLoopModelPattern = /([\w$]+)\.options\.mainLoopModel/;
     const mlmMatch = scope.match(mainLoopModelPattern);
@@ -252,15 +259,38 @@ function transform(code) {
     const callPattern = new RegExp(`${escapeRegex(ultraFn)}\\s*\\(([\\w$]+)\\)`, "g");
     let callReplaced = false;
 
-    // Find .options.mainLoopModel context
-    const ctxPattern = /([\w$]+)\.options\.mainLoopModel/g;
+    // Find .options.mainLoopModel context — search in the same function scope
+    // as the call site, not just "nearby" which can cross function boundaries.
+    const ctxPattern = /([\\w$]+)\\.options\\.mainLoopModel/g;
     let ctxVar = null;
     let m;
-    while ((m = ctxPattern.exec(code)) !== null) {
-      const nearby = code.substring(Math.max(0, m.index - 500), m.index + 500);
-      if (nearby.includes(ultraFn)) {
-        ctxVar = m[1];
-        break;
+    // First find the call site to anchor the scope search
+    // Match ultraFn(arg) but NOT as a function definition (not preceded by 'function')
+    const callSitePattern = new RegExp(`(?<!function\\s+)${escapeRegex(ultraFn)}\\s*\\(([\\w$]+)\\)`);
+    const callSiteMatch = callSitePattern.exec(code);
+    if (callSiteMatch) {
+      // Walk backwards from the call site to find the enclosing function
+      let fnScopeStart = 0;
+      for (let si = callSiteMatch.index; si >= Math.max(0, callSiteMatch.index - 5000); si--) {
+        if (code.substring(si, si + 8) === 'function') {
+          fnScopeStart = si;
+          break;
+        }
+      }
+      const scopeEnd = Math.min(code.length, callSiteMatch.index + 500);
+      const scope = code.substring(fnScopeStart, scopeEnd);
+      const scopeMlm = scope.match(/([\w$]+)\.options\.mainLoopModel/);
+      if (scopeMlm) ctxVar = scopeMlm[1];
+    }
+    // Fallback to broader search if scope-based failed
+    if (!ctxVar) {
+      ctxPattern.lastIndex = 0;
+      while ((m = ctxPattern.exec(code)) !== null) {
+        const nearby = code.substring(Math.max(0, m.index - 500), m.index + 500);
+        if (nearby.includes(ultraFn)) {
+          ctxVar = m[1];
+          break;
+        }
       }
     }
 

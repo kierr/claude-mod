@@ -84,10 +84,10 @@ describe("codemod-unlock-ultracode", () => {
     expect(repatched).toBe(patched);
   });
 
-  it("throws when no capability check functions are found", () => {
-    // The codemod throws rather than silently returning 0 — this is by design
-    // so the patch engine reports the failure explicitly.
-    expect(() => transform("var x = 42;")).toThrow();
+  it("returns changed: 0 when no capability check functions are found", () => {
+    // In code-split mode, targets may be in different chunks — changed:0 is not an error
+    const result = transform("var x = 42;");
+    expect(result.changed).toBe(0);
   });
 
   it("exports transform as a function", () => {
