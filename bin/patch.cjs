@@ -876,6 +876,14 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
   let totalFailed = 0;
   const allSkippedPatchNames = [];
 
+  // Pre-read all chunk files once to avoid O(patches × chunks) I/O
+  const chunkContents = new Map();
+  for (const chunkFile of chunkFiles) {
+    try {
+      chunkContents.set(chunkFile, fs.readFileSync(chunkFile, "utf8"));
+    } catch { /* skip unreadable files */ }
+  }
+
   for (const patchId of patches) {
     const yamlPath = path.join(PATCHES_DIR, `${patchId}.yaml`);
     if (!fs.existsSync(yamlPath)) continue;
@@ -889,13 +897,10 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
     // Find deobfuscated chunk files that contain the applicable pattern
     const applicableRe = new RegExp(applicableTest);
     const matchingChunks = [];
-    for (const chunkFile of chunkFiles) {
-      try {
-        const content = fs.readFileSync(chunkFile, "utf8");
-        if (applicableRe.test(content)) {
-          matchingChunks.push(chunkFile);
-        }
-      } catch { /* skip unreadable files */ }
+    for (const [chunkFile, content] of chunkContents) {
+      if (applicableRe.test(content)) {
+        matchingChunks.push(chunkFile);
+      }
     }
 
     if (matchingChunks.length === 0) {
@@ -939,14 +944,11 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
     if (!appliedTest) continue;
 
     let found = false;
-    for (const chunkFile of chunkFiles) {
-      try {
-        const content = fs.readFileSync(chunkFile, "utf8");
-        if (new RegExp(appliedTest).test(content)) {
-          found = true;
-          break;
-        }
-      } catch { /* skip */ }
+    for (const [chunkFile, content] of chunkContents) {
+      if (new RegExp(appliedTest).test(content)) {
+        found = true;
+        break;
+      }
     }
     if (!found) {
       allSkippedPatchNames.push(patchId);
