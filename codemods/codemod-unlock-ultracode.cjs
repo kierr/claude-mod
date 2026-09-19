@@ -20,8 +20,11 @@ const path = require("path");
  * We inject a guard at the top of the function body that returns true when the mod is enabled.
  */
 function patchXhighCapabilityCheck(code) {
-  // Match the VcH function by its unique "xhigh_effort" string literal
-  const pattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{\s*let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']xhigh_effort["']\s*\)\s*;/;
+  // Match the xhigh_effort capability check function.
+  // Monolithic: function NAME(H) { let _ = HR(H, "xhigh_effort");
+  // Code-split:  function NAME(e) { if (y7t(e)) { return false; } let n = dce(e, "xhigh_effort");
+  // Use a flexible pattern that allows intervening code before the xhigh_effort anchor.
+  const pattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{[\s\S]*?let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']xhigh_effort["']\s*\)\s*;/;
   const match = code.match(pattern);
 
   if (!match) {
@@ -29,14 +32,19 @@ function patchXhighCapabilityCheck(code) {
   }
 
   const funcName = match[1];
+  const param = match[2];
   const funcStart = match.index;
 
   // Find the opening brace of the function body
   const bodyStart = code.indexOf("{", funcStart);
 
   // Verify this is the right function by checking for claude model references nearby
-  const contextWindow = code.substring(funcStart, Math.min(code.length, funcStart + 600));
-  if (!contextWindow.includes("claude-opus-4-8") || !contextWindow.includes("claude-haiku-4-5")) {
+  const contextWindow = code.substring(funcStart, Math.min(code.length, funcStart + 800));
+  const hasModelRefs = contextWindow.includes("claude-opus-4-8") ||
+    contextWindow.includes("claude-opus-4-7") ||
+    contextWindow.includes("claude-mythos");
+  const hasHaikuRef = contextWindow.includes("claude-haiku-4-5");
+  if (!hasModelRefs && !hasHaikuRef) {
     return { code, changed: 0 };
   }
 
@@ -58,16 +66,14 @@ function patchXhighCapabilityCheck(code) {
 function patchMaxEffortCheck(code) {
   // Idempotency: if already patched, skip
   if (code.includes('__isModEnabled__("unlock_ultracode")')) {
-    // Already patched by patchXhighCapabilityCheck — check if we need a second patch
-    // Count occurrences of the guard
     const guardCount = (code.match(/__isModEnabled__\("unlock_ultracode"\)/g) || []).length;
     if (guardCount >= 2) {
       return { code, changed: 0 };
     }
   }
 
-  // Find the max_effort function that's near xhigh_effort
-  const pattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{\s*let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']max_effort["']\s*\)\s*;/;
+  // Find the max_effort function — flexible pattern like xhigh_effort above.
+  const pattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{[\s\S]*?let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']max_effort["']\s*\)\s*;/;
   const match = code.match(pattern);
 
   if (!match) {
@@ -77,8 +83,12 @@ function patchMaxEffortCheck(code) {
   const funcStart = match.index;
 
   // Verify by checking for claude model references
-  const contextWindow = code.substring(funcStart, Math.min(code.length, funcStart + 600));
-  if (!contextWindow.includes("claude-opus-4-8") || !contextWindow.includes("claude-sonnet-4-6")) {
+  const contextWindow = code.substring(funcStart, Math.min(code.length, funcStart + 800));
+  const hasModelRefs = contextWindow.includes("claude-opus-4-8") ||
+    contextWindow.includes("claude-opus-4-7") ||
+    contextWindow.includes("claude-mythos");
+  const hasSonnetRef = contextWindow.includes("claude-sonnet-4-6") || contextWindow.includes("claude-sonnet-4-5");
+  if (!hasModelRefs && !hasSonnetRef) {
     return { code, changed: 0 };
   }
 
@@ -109,10 +119,8 @@ function transform(code) {
   code = r2.code;
   totalChanged += r2.changed;
 
-  if (totalChanged === 0) {
-    throw new Error("unlock_ultracode: could not find xhigh/max effort capability check functions");
-  }
-
+  // Partial application: in code-split, xhigh and max may be in different chunks.
+  // Return changed:0 (not an error) when nothing matched — other chunks may differ.
   return { code, changed: totalChanged };
 }
 

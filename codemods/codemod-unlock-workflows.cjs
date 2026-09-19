@@ -34,46 +34,76 @@ function patchAllowWorkflowsGate(code) {
  * Add a guarded availability override before the resolver checks feature flags and plan.
  */
 function patchWorkflowAvailability(code) {
-  // Match the FX5 function by finding the unique "tengu_workflows_enabled" + "defaultOn: OK() !== "pro"" pattern
-  // Strategy: find function containing both "tengu_workflows_enabled" and the pro plan check
-  const funcPattern = /function\s+([\w$]+)\s*\(\)\s*\{\s*if\s*\(\s*([\w$]+)\s*\(\s*process\.env\.CLAUDE_CODE_WORKFLOWS\s*\)\s*\)\s*\{\s*let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*["']tengu_workflows_enabled["']\s*,\s*true\s*\)/;
-  const match = code.match(funcPattern);
+  // Strategy: find function containing "tengu_workflows_enabled" that returns
+  // { available: ..., defaultOn: ... } — the availability resolver.
+  // Works with both process.env.CLAUDE_CODE_WORKFLOWS (monolithic) and
+  // cached-env.CLAUDE_CODE_WORKFLOWS (code-split) patterns.
+
+  // Pattern A (monolithic): function NAME() { if (NAME2(process.env.CLAUDE_CODE_WORKFLOWS)) {
+  const funcPatternA = /function\s+([\w$]+)\s*\(\)\s*\{\s*if\s*\(\s*([\w$]+)\s*\(\s*process\.env\.CLAUDE_CODE_WORKFLOWS\s*\)\s*\)\s*\{\s*let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*["']tengu_workflows_enabled["']\s*,\s*true\s*\)/;
+  // Pattern B (code-split): function NAME() { if (NAME.CLAUDE_CODE_WORKFLOWS === true) {
+  const funcPatternB = /function\s+([\w$]+)\s*\(\)\s*\{[\s\S]*?CLAUDE_CODE_WORKFLOWS[^}]*?tengu_workflows_enabled[\s\S]*?available\s*:/;
+
+  let match = code.match(funcPatternA);
+  let matchType = "A";
+  if (!match) {
+    // Try pattern B: find a function that contains both CLAUDE_CODE_WORKFLOWS and
+    // tengu_workflows_enabled and returns { available: ... }
+    // We need a different strategy — search for the function boundary manually
+    match = code.match(funcPatternB);
+    matchType = "B";
+  }
 
   if (!match) {
     return { code, changed: 0 };
   }
 
-  const funcName = match[1];
-  const funcStart = match.index;
+  if (matchType === "A") {
+    // Original monolithic pattern — brace-count to find function body
+    const funcStart = match.index;
+    const openBracePos = code.indexOf("{", funcStart);
+    if (openBracePos === -1) return { code, changed: 0 };
+    const closeBracePos = findMatchingBrace(code, openBracePos, "{", "}");
+    if (closeBracePos === -1) return { code, changed: 0 };
 
-  // Find the function body by brace counting (string-aware)
-  const openBracePos = code.indexOf("{", funcStart);
-  if (openBracePos === -1) {
-    return { code, changed: 0 };
-  }
-  const closeBracePos = findMatchingBrace(code, openBracePos, "{", "}");
-  if (closeBracePos === -1) {
-    return { code, changed: 0 };
-  }
-  const funcBodyStart = openBracePos;
-  const funcBodyEnd = closeBracePos + 1;
+    const guard =
+      'if (typeof __isModEnabled__ === "function" && __isModEnabled__("unlock_workflows")) {' +
+      '  return { available: true, defaultOn: true };' +
+      '}';
 
-  // Verify this is the right function by checking for the pro plan check
-  const funcBody = code.substring(funcStart, funcBodyEnd);
-  if (!funcBody.includes("tengu_workflows_enabled") || !funcBody.includes('"pro"')) {
-    return { code, changed: 0 };
+    const insertPos = openBracePos + 1;
+    code = code.substring(0, insertPos) + guard + code.substring(insertPos);
+    return { code, changed: 1 };
   }
 
-  // Insert the mod guard right after the opening brace of the function body
-  const guard =
-    'if (typeof __isModEnabled__ === "function" && __isModEnabled__("unlock_workflows")) {' +
-    '  return { available: true, defaultOn: true };' +
-    '}';
+  // Pattern B (code-split): find the function that is the availability resolver.
+  // It contains CLAUDE_CODE_WORKFLOWS and returns { available: ..., defaultOn: ... }.
+  // Find each function definition and check if it matches.
+  const funcDeclPattern = /function\s+([\w$]+)\s*\(\)\s*\{/g;
+  let funcMatch;
+  while ((funcMatch = funcDeclPattern.exec(code)) !== null) {
+    const funcName = funcMatch[1];
+    const openBracePos = funcMatch.index + funcMatch[0].length - 1;
+    const closeBracePos = findMatchingBrace(code, openBracePos, "{", "}");
+    if (closeBracePos === -1) continue;
 
-  const insertPos = funcBodyStart + 1;
-  code = code.substring(0, insertPos) + guard + code.substring(insertPos);
+    const funcBody = code.substring(funcMatch.index, closeBracePos + 1);
+    if (funcBody.includes("CLAUDE_CODE_WORKFLOWS") &&
+        funcBody.includes("tengu_workflows_enabled") &&
+        funcBody.includes("available:") &&
+        funcBody.includes("defaultOn:")) {
+      const guard =
+        'if (typeof __isModEnabled__ === "function" && __isModEnabled__("unlock_workflows")) {' +
+        '  return { available: true, defaultOn: true };' +
+        '}';
 
-  return { code, changed: 1 };
+      const insertPos = openBracePos + 1;
+      code = code.substring(0, insertPos) + guard + code.substring(insertPos);
+      return { code, changed: 1 };
+    }
+  }
+
+  return { code, changed: 0 };
 }
 
 function transform(code) {
@@ -88,18 +118,14 @@ function transform(code) {
   code = r1.code;
   totalChanged += r1.changed;
 
-  if (r1.changed === 0) {
-    throw new Error("unlock_workflows: could not find allow_workflows gate function");
-  }
-
   const r2 = patchWorkflowAvailability(code);
   code = r2.code;
   totalChanged += r2.changed;
 
-  if (r2.changed === 0) {
-    throw new Error("unlock_workflows: could not find FX5() workflow availability resolver");
-  }
-
+  // Partial application: in code-split binaries, gate and resolver may be in
+  // different chunks. Each chunk applies independently, so one may match while
+  // the other doesn't. Return changed:0 (not an error) when nothing matched
+  // in this chunk — other chunks may have different content.
   return { code, changed: totalChanged };
 }
 

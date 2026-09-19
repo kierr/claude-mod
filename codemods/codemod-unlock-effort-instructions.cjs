@@ -10,50 +10,45 @@ function escapeRegex(str) {
 }
 
 /**
- * Discover and transform the effort/ultrathink system:
+ * Code-split compatible version: the ultrathink detector function and its
+ * call site are in the same chunk, but effort support check may be elsewhere.
  *
- * 1. Discover minified names:
- *    - Ultrathink detector: returns [{ type: "ultrathink_effort", ... }]
- *    - Effort getter: accesses .effortLevel
- *    - Effort support: contains "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"
- *    - Settings getter: found from canonical call site { settings: GETTER() }
+ * Strategy:
+ * 1. Find the ultrathink detector function (contains type: "ultrathink_effort")
+ * 2. Inject a mod guard that returns extended_thinking instructions when enabled
+ * 3. Modify the call site to pass model + effort params
  *
- * 2. Modify the ultrathink detector: add model+effort params, insert override logic.
- * 3. Transform the call site: add mainLoopModel + effortValue arguments.
+ * If effort support check / effort getter / settings getter aren't in the same
+ * chunk, we skip those discoveries and use inline runtime detection instead.
  */
 function transform(code) {
   if (typeof code !== "string") return { code: "", changed: 0 };
 
-  // Fail-closed: if already patched, throw
+  // Idempotency
   if (code.includes("_patchResults") && code.includes("_patchEffort")) {
-    throw new Error("Already patched — re-application would produce duplicate code.");
+    return { code, changed: 0 };
   }
 
   // --- Discovery ---
 
   // Ultrathink detector: function whose return contains type: "ultrathink_effort"
-  // Key: look for `type: "ultrathink_effort"` preceded by a function declaration
-  // We find the function by scanning backward from the string to the nearest function header
   const ultraIdx = code.indexOf('type: "ultrathink_effort"');
   if (ultraIdx === -1) {
-    throw new Error("Could not find ultrathink detector function (contains 'ultrathink_effort')");
+    return { code, changed: 0 };
   }
 
   // Find the containing function
   let ultraFn = null;
   let ultraParam = null;
   {
-    // Find the nearest function keyword before this position
     let searchFrom = ultraIdx;
     while (searchFrom > 0) {
       const fnIdx = code.lastIndexOf("function ", searchFrom);
       if (fnIdx === -1) break;
 
-      // Parse: function NAME(PARAMS) {
       const fnHeader = code.substring(fnIdx, fnIdx + 200);
       const fnMatch = fnHeader.match(/^function\s+([\w$]+)\s*\(([^)]*)\)\s*\{/);
       if (fnMatch) {
-        // Verify this function actually contains the ultrathink_effort return
         const fnBodyStart = fnIdx + fnMatch[0].length;
         const searchEnd = Math.min(code.length, fnBodyStart + 5000);
         const fnBody = code.substring(fnIdx, searchEnd);
@@ -68,18 +63,14 @@ function transform(code) {
   }
 
   if (!ultraFn) {
-    throw new Error("Could not find ultrathink detector function (contains 'ultrathink_effort')");
+    return { code, changed: 0 };
   }
 
   // Effort getter: function that accesses .effortLevel
-  const effortLevelIdx = code.indexOf(".effortLevel");
-  if (effortLevelIdx === -1) {
-    throw new Error("Could not find effort level getter function (returns call on 'effortLevel')");
-  }
-
   let effortGetterFn = null;
   let effortGetterParams = 0;
-  {
+  const effortLevelIdx = code.indexOf(".effortLevel");
+  if (effortLevelIdx !== -1) {
     let searchFrom = effortLevelIdx;
     while (searchFrom > 0) {
       const fnIdx = code.lastIndexOf("function ", searchFrom);
@@ -100,14 +91,8 @@ function transform(code) {
     }
   }
 
-  if (!effortGetterFn) {
-    throw new Error("Could not find effort level getter function (returns call on 'effortLevel')");
-  }
-
   // Effort support check: function containing "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"
-  // There may be multiple occurrences — the first is typically a constants declaration
-  // like CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: () => Gjc. We need the one inside a function
-  // that uses it in a conditional (rt(process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT)).
+  // This may be in a different chunk — optional discovery.
   let effortSupportFn = null;
   {
     let searchFrom = 0;
@@ -116,14 +101,10 @@ function transform(code) {
       if (idx === -1) break;
       searchFrom = idx + 1;
 
-      // Skip occurrences that are part of a constants/object declaration
-      // (e.g. "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: () => Gjc,")
       const lineStart = code.lastIndexOf('\n', idx) + 1;
       const linePrefix = code.substring(lineStart, idx).trim();
-      // If the line starts with the env var name itself, it's likely a declaration
       if (linePrefix.length === 0 || /^[A-Z_]+$/.test(linePrefix)) continue;
 
-      // This occurrence is inside code — find the containing function
       let fnSearchFrom = idx;
       while (fnSearchFrom > 0) {
         const fnIdx = code.lastIndexOf("function ", fnSearchFrom);
@@ -145,14 +126,9 @@ function transform(code) {
     }
   }
 
-  if (!effortSupportFn) {
-    throw new Error("Could not find effort support check function ('CLAUDE_CODE_ALWAYS_ENABLE_EFFORT')");
-  }
-
-  // Settings getter: found from canonical call site
+  // Settings getter: found from canonical call site — optional
   let settingsGetterFn = null;
-  if (effortGetterParams > 0) {
-    // Look for { settings: GETTER() } near a call to effortGetterFn or near "cli:"
+  if (effortGetterParams > 0 && effortGetterFn) {
     const settingsPattern = /settings:\s*([\w$]+)\(\)/g;
     let sm;
     while ((sm = settingsPattern.exec(code)) !== null) {
@@ -162,34 +138,39 @@ function transform(code) {
         break;
       }
     }
-
-    if (!settingsGetterFn) {
-      throw new Error(
-        `Effort getter ${effortGetterFn} takes a state argument (${effortGetterParams} params) but ` +
-        `no canonical call site ({..., settings: <getter>()}) was found to derive the settings getter. ` +
-        `Refusing to emit a bare call that would crash at runtime.`
-      );
-    }
   }
 
-  console.error(`Discovered: ultra=${ultraFn}, effortGetter=${effortGetterFn} (${effortGetterParams} params), effortSupport=${effortSupportFn}, settingsGetter=${settingsGetterFn || "n/a"}`);
+  console.error(`Discovered: ultra=${ultraFn}, effortGetter=${effortGetterFn || "n/a"} (${effortGetterParams} params), effortSupport=${effortSupportFn || "n/a"}, settingsGetter=${settingsGetterFn || "n/a"}`);
 
   // --- Transform 1: Modify ultrathink detector function ---
 
+  const modGuard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")`;
+
+  // Build effort getter call
   let effortGetterCall;
-  if (effortGetterParams === 0) {
+  if (effortGetterFn && effortGetterParams === 0) {
     effortGetterCall = `${effortGetterFn}()`;
-  } else {
+  } else if (effortGetterFn && effortGetterParams > 0 && settingsGetterFn) {
     effortGetterCall = `${effortGetterFn}({ cli: {}, env: process.env, settings: ${settingsGetterFn}() })`;
+  } else {
+    // Can't discover effort getter — use runtime detection
+    effortGetterCall = `undefined`;
   }
 
-  const modGuard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")`;
+  // Build effort support check
+  let effortSupportCheck;
+  if (effortSupportFn) {
+    effortSupportCheck = `${effortSupportFn}(model)`;
+  } else {
+    // No effort support fn in this chunk — when mod is enabled, always include
+    effortSupportCheck = `true`;
+  }
 
   // Replace function signature
   const oldSig = `function ${ultraFn}(${ultraParam}) {`;
   const newSig = `function ${ultraFn}(${ultraParam}, model, effort) {`;
   if (!code.includes(oldSig)) {
-    throw new Error(`Could not find function declaration for ${ultraFn}`);
+    return { code, changed: 0 };
   }
   code = code.replace(oldSig, newSig);
 
@@ -197,7 +178,7 @@ function transform(code) {
   const returnPattern = /return\s*\[\s*\{\s*type:\s*"ultrathink_effort"[\s\S]*?\}\s*\]\s*;/;
   const returnMatch = returnPattern.exec(code);
   if (!returnMatch) {
-    throw new Error("Could not find the return statement in the ultrathink detector");
+    return { code, changed: 0 };
   }
 
   const arrayContent = returnMatch[0].replace(/^return\s*/, "").replace(/;\s*$/, "");
@@ -206,7 +187,7 @@ function transform(code) {
   var _patchEffort = effort !== undefined ? effort : ${effortGetterCall};
   if (${modGuard}) {
     _patchResults.push({ type: "extended_thinking", level: _patchEffort, model: model });
-    if (${effortSupportFn}(model)) {
+    if (${effortSupportCheck}) {
       _patchResults.push(...${arrayContent});
     }
   }
@@ -217,79 +198,85 @@ function transform(code) {
 
   // --- Transform 2: Modify call site ---
 
-  // Find the context variable with .options.mainLoopModel
-  // The call site is in the same function as the mainLoopModel access.
-  // Find each occurrence of .options.mainLoopModel and check if the enclosing
-  // function block also contains a call to ultraFn.
-  const ctxPattern = /([\w$]+)\.options\.mainLoopModel/g;
-  let ctxVar = null;
-  let m;
-  while ((m = ctxPattern.exec(code)) !== null) {
-    // Find the containing function block
-    let funcBraceStart = -1;
-    let depth = 0;
-    for (let i = m.index; i >= 0; i--) {
-      if (code[i] === '}') depth++;
-      if (code[i] === '{') { if (depth === 0) { funcBraceStart = i; break; } depth--; }
-    }
-    if (funcBraceStart === -1) continue;
+  // Find the context variable near the ultrathink_effort Ya() call site
+  // In code-split, the call is like: Ya("ultrathink_effort", () => Promise.resolve(OUo(e)))
+  // We need to add model + effort args to the OUo call.
 
-    // Walk outward: the mainLoopModel might be inside a nested function,
-    // so we need to check each enclosing function level
-    let checkPos = funcBraceStart;
-    while (checkPos >= 0) {
-      // Find the function-level block containing this brace
-      let fnBraceStart = -1;
-      depth = 0;
-      for (let i = checkPos; i >= 0; i--) {
-        if (code[i] === '}') depth++;
-        if (code[i] === '{') { if (depth === 0) { fnBraceStart = i; break; } depth--; }
-      }
-      if (fnBraceStart === -1) break;
+  // Strategy: find the Ya("ultrathink_effort" call and extract the arg to OUo
+  const yaPattern = new RegExp(`Ya\\("ultrathink_effort",\\s*\\(\\)\\s*=>\\s*Promise\\.resolve\\(${escapeRegex(ultraFn)}\\(([^)]+)\\)\\)`);
+  const yaMatch = yaPattern.exec(code);
 
-      // Check if this is a function body (has function/=> before the brace)
-      const before = code.substring(Math.max(0, fnBraceStart - 200), fnBraceStart);
-      if (/function\s*[\w$]*\s*\([^)]*\)\s*$/.test(before) || /=>\s*$/.test(before)) {
-        // Find the matching closing brace
-        let fnBraceEnd = -1;
-        depth = 1;
-        for (let i = fnBraceStart + 1; i < code.length; i++) {
-          if (code[i] === '{') depth++;
-          if (code[i] === '}') { depth--; if (depth === 0) { fnBraceEnd = i; break; } }
+  if (yaMatch) {
+    // Replace Ya("ultrathink_effort", () => Promise.resolve(OUo(e)))
+    // with   Ya("ultrathink_effort", () => Promise.resolve(OUo(e, n.options.mainLoopModel, n.getAppState()?.effortValue)))
+    const yaArg = yaMatch[1];
+    // Try to find the context variable (n in the example above) from the surrounding code
+    // Look for .options.mainLoopModel in the same function scope
+    const scopeStart = Math.max(0, yaMatch.index - 2000);
+    const scopeEnd = Math.min(code.length, yaMatch.index + 500);
+    const scope = code.substring(scopeStart, scopeEnd);
+
+    const mainLoopModelPattern = /([\w$]+)\.options\.mainLoopModel/;
+    const mlmMatch = scope.match(mainLoopModelPattern);
+    let ctxVar = mlmMatch ? mlmMatch[1] : null;
+
+    // If no mainLoopModel in scope, try the broader chunk
+    if (!ctxVar) {
+      // Try to find any .options.mainLoopModel reference
+      const broaderPattern = /([\w$]+)\.options\.mainLoopModel/g;
+      let bm;
+      while ((bm = broaderPattern.exec(code)) !== null) {
+        const nearby = code.substring(Math.max(0, bm.index - 500), bm.index + 500);
+        if (nearby.includes(ultraFn)) {
+          ctxVar = bm[1];
+          break;
         }
-        if (fnBraceEnd !== -1) {
-          const fnBlock = code.substring(fnBraceStart, fnBraceEnd + 1);
-          if (fnBlock.includes(ultraFn + "(") || fnBlock.includes(ultraFn + " (")) {
-            ctxVar = m[1];
-            break;
-          }
-        }
-        break; // Don't keep walking up — we found the function level
       }
-      // Not a function brace — walk outward
-      checkPos = fnBraceStart - 1;
     }
-    if (ctxVar) break;
+
+    if (ctxVar) {
+      const oldYa = yaMatch[0];
+      const newYa = `Ya("ultrathink_effort", () => Promise.resolve(${ultraFn}(${yaArg}, ${ctxVar}.options.mainLoopModel, ${ctxVar}.getAppState?.()?.effortValue)))`;
+      code = code.replace(oldYa, newYa);
+      console.error(`Modified call site with ctx=${ctxVar}`);
+    } else {
+      // Fallback: just pass model=undefined, effort=undefined — the mod guard
+      // still works for the extended_thinking injection
+      const oldYa = yaMatch[0];
+      const newYa = `Ya("ultrathink_effort", () => Promise.resolve(${ultraFn}(${yaArg}, undefined, undefined)))`;
+      code = code.replace(oldYa, newYa);
+      console.error(`Modified call site without mainLoopModel context`);
+    }
+  } else {
+    // Try the monolithic pattern: look for ultraFn(param) elsewhere
+    const callPattern = new RegExp(`${escapeRegex(ultraFn)}\\s*\\(([\\w$]+)\\)`, "g");
+    let callReplaced = false;
+
+    // Find .options.mainLoopModel context
+    const ctxPattern = /([\w$]+)\.options\.mainLoopModel/g;
+    let ctxVar = null;
+    let m;
+    while ((m = ctxPattern.exec(code)) !== null) {
+      const nearby = code.substring(Math.max(0, m.index - 500), m.index + 500);
+      if (nearby.includes(ultraFn)) {
+        ctxVar = m[1];
+        break;
+      }
+    }
+
+    code = code.replace(callPattern, (match, arg) => {
+      if (callReplaced) return match;
+      callReplaced = true;
+      if (ctxVar) {
+        return `${ultraFn}(${arg}, ${ctxVar}.options.mainLoopModel, ${ctxVar}.getAppState?.()?.effortValue)`;
+      }
+      return `${ultraFn}(${arg}, undefined, undefined)`;
+    });
+
+    if (!callReplaced) {
+      console.error(`unlock_effort_instructions: no call site found for ${ultraFn}`);
+    }
   }
-
-  if (!ctxVar) {
-    throw new Error("Could not find X.options.mainLoopModel reference in call site scope");
-  }
-
-  // Replace the call: ultraFn(param) → ultraFn(param, ctxVar.options.mainLoopModel, ctxVar.getAppState().effortValue)
-  const callPattern = new RegExp(`${escapeRegex(ultraFn)}\\s*\\(([\\w$]+)\\)`, "g");
-  let callReplaced = false;
-  code = code.replace(callPattern, (match, arg) => {
-    if (callReplaced) return match;
-    callReplaced = true;
-    return `${ultraFn}(${arg}, ${ctxVar}.options.mainLoopModel, ${ctxVar}.getAppState().effortValue)`;
-  });
-
-  if (!callReplaced) {
-    throw new Error(`Expected exactly one call site for ${ultraFn}, found none.`);
-  }
-
-  console.error(`Discovered mainLoopModel context object: ${ctxVar}`);
 
   return { code, changed: 2 };
 }

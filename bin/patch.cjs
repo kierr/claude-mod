@@ -889,7 +889,14 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
     } catch { /* skip unreadable files */ }
   }
 
+  // Code-split patches already handled by pipeline-level fixBunCjsWrapper()
+  const CODESPLIT_SKIP_PATCHES = new Set(["mods_runtime"]);
+
   for (const patchId of patches) {
+    if (CODESPLIT_SKIP_PATCHES.has(patchId)) {
+      allSkippedPatchNames.push(patchId);
+      continue;
+    }
     const yamlPath = path.join(PATCHES_DIR, `${patchId}.yaml`);
     if (!fs.existsSync(yamlPath)) continue;
     const patchDef = parseYAMLLib(fs.readFileSync(yamlPath, "utf8"));
