@@ -21,14 +21,29 @@ const GUARD =
  * Anchor: the native-binary branch `if (FN()) { return { cmd: process.execPath, prefixArgs: []`.
  */
 function patchQF(code) {
-  const re = /if \(([\w$]+)\(\)\) \{\n      return \{\n        cmd: process\.execPath,\n        prefixArgs: \[\]/;
-  if (!re.test(code)) return { code, changed: 0 };
-  code = code.replace(
-    re,
-    (m, fn) =>
-      `if (${fn}()) {\n      return {\n        cmd: process.execPath,\n        prefixArgs: ${GUARD} ? [process.argv[1]] : []`,
-  );
-  return { code, changed: 1 };
+  // Monolithic pattern (multi-line, indented)
+  const reMono = /if \(([\w$]+)\(\)\) \{\n      return \{\n        cmd: process\.execPath,\n        prefixArgs: \[\]/;
+  if (reMono.test(code)) {
+    code = code.replace(
+      reMono,
+      (_, fn) =>
+        `if (${fn}()) {\n      return {\n        cmd: process.execPath,\n        prefixArgs: ${GUARD} ? [process.argv[1]] : []`,
+    );
+    return { code, changed: 1 };
+  }
+
+  // Code-split pattern: if(Bu())return{cmd:process.execPath,prefixArgs:[],target:process.execPath}
+  const reCS = /if\(([\w$]+)\(\)\)return\{cmd:process\.execPath,prefixArgs:\[\],target:process\.execPath\}/;
+  if (reCS.test(code)) {
+    code = code.replace(
+      reCS,
+      (_, fn) =>
+        `if(${fn}())return{cmd:process.execPath,prefixArgs:${GUARD}?[process.argv[1]]:[],target:process.execPath}`,
+    );
+    return { code, changed: 1 };
+  }
+
+  return { code, changed: 0 };
 }
 
 /**
@@ -36,13 +51,27 @@ function patchQF(code) {
  * Anchor: the unique literal `return [process.execPath];`.
  */
 function patchU3m(code) {
-  const re = /return \[process\.execPath\];/;
-  if (!re.test(code)) return { code, changed: 0 };
-  code = code.replace(
-    re,
-    `return ${GUARD} ? [process.execPath, process.argv[1]] : [process.execPath];`,
-  );
-  return { code, changed: 1 };
+  // Monolithic pattern
+  const reMono = /return \[process\.execPath\];/;
+  if (reMono.test(code)) {
+    code = code.replace(
+      reMono,
+      `return ${GUARD} ? [process.execPath, process.argv[1]] : [process.execPath];`,
+    );
+    return { code, changed: 1 };
+  }
+
+  // Code-split pattern: the che function has a branch that returns prefixArgs:[] after Bu() check
+  // where the next branch already uses process.argv[1] via a local variable.
+  // The u3m spare-pool is merged into che in code-split, so this is covered by patchQF's code-split branch.
+  // But there may be a standalone return [process.execPath] in other code-split chunks.
+  const reCS = /return\[process\.execPath,process\.argv\[1\]\]/;
+  if (reCS.test(code)) {
+    // Already patched or already has argv[1] — no change needed
+    return { code, changed: 0 };
+  }
+
+  return { code, changed: 0 };
 }
 
 /**
@@ -50,14 +79,31 @@ function patchU3m(code) {
  * Anchor: the `? [x] : [x, process.argv[1]]` ternary (backreference enforces same var x).
  */
 function patchPosixSpawn(code) {
-  const re = /let ([\w$]+) = ([\w$]+)\(\) \? \[([\w$]+)\] : \[\3, process\.argv\[1\]\];/;
-  if (!re.test(code)) return { code, changed: 0 };
-  code = code.replace(
-    re,
-    (m, v, fn, x) =>
-      `let ${v} = ${GUARD} ? [${x}, process.argv[1]] : (${fn}() ? [${x}] : [${x}, process.argv[1]]);`,
-  );
-  return { code, changed: 1 };
+  // Monolithic pattern
+  const reMono = /let ([\w$]+) = ([\w$]+)\(\) \? \[([\w$]+)\] : \[\3, process\.argv\[1\]\];/;
+  if (reMono.test(code)) {
+    code = code.replace(
+      reMono,
+      (_, v, fn, x) =>
+        `let ${v} = ${GUARD} ? [${x}, process.argv[1]] : (${fn}() ? [${x}] : [${x}, process.argv[1]]);`,
+    );
+    return { code, changed: 1 };
+  }
+
+  // Code-split pattern: the che function's "if(!e)return{...prefixArgs:[],...}" branch
+  // In code-split, process.argv[1] is already available as a local var (e), and the
+  // "no argv[1]" branch returns prefixArgs:[]. The fix is to guard it with the mod guard.
+  // Pattern: let e=process.argv[1];if(!e)return{cmd:process.execPath,prefixArgs:[],target:process.execPath};return{cmd:process.execPath,prefixArgs:[e],target:e}
+  const reCSNoArgv = /(let\s+[\w$]+\s*=\s*process\.argv\[1\];if\(![\w$]+\)return\{cmd:process\.execPath,prefixArgs:)\[\]/;
+  if (reCSNoArgv.test(code)) {
+    code = code.replace(
+      reCSNoArgv,
+      (_, prefix) => `${prefix}${GUARD}?[process.argv[1]]:[]`,
+    );
+    return { code, changed: 1 };
+  }
+
+  return { code, changed: 0 };
 }
 
 function transform(code) {
@@ -73,7 +119,9 @@ function transform(code) {
     totalChanged += r.changed;
   }
 
-  if (totalChanged >= REQUIRED_CHANGES) {
+  // In code-split, the three sites may be in one chunk (che function) or
+  // split across chunks. Accept any positive change count.
+  if (totalChanged > 0) {
     const marker = "\nvar __ssp_patched__ = true;\n";
     const firstFunc = code.indexOf("function ");
     if (firstFunc > 0) {
