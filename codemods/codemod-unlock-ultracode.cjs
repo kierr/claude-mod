@@ -23,9 +23,19 @@ function patchXhighCapabilityCheck(code) {
   // Match the xhigh_effort capability check function.
   // Monolithic: function NAME(H) { let _ = HR(H, "xhigh_effort");
   // Code-split:  function NAME(e) { if (y7t(e)) { return false; } let n = dce(e, "xhigh_effort");
-  // Use a flexible pattern that allows intervening code before the xhigh_effort anchor.
-  const pattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{[\s\S]*?let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']xhigh_effort["']\s*\)\s*;/;
-  const match = code.match(pattern);
+  //
+  // Try strict pattern first (no intervening code), then flexible
+  // (allows guarded returns before the xhigh_effort check).
+  // The flexible pattern must NOT cross into a nested function — limit
+  // to at most 200 chars between opening brace and the let statement.
+
+  const strictPattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{\s*let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']xhigh_effort["']\s*\)\s*;/;
+  const flexPattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{[\s\S]{1,200}?let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']xhigh_effort["']\s*\)\s*;/;
+
+  let match = code.match(strictPattern);
+  if (!match) {
+    match = code.match(flexPattern);
+  }
 
   if (!match) {
     return { code, changed: 0 };
@@ -72,9 +82,14 @@ function patchMaxEffortCheck(code) {
     }
   }
 
-  // Find the max_effort function — flexible pattern like xhigh_effort above.
-  const pattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{[\s\S]*?let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']max_effort["']\s*\)\s*;/;
-  const match = code.match(pattern);
+  // Find the max_effort function — try strict first, then flexible.
+  const strictPattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{\s*let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']max_effort["']\s*\)\s*;/;
+  const flexPattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{[\s\S]{1,200}?let\s+([\w$]+)\s*=\s*([\w$]+)\s*\(\s*\2\s*,\s*["']max_effort["']\s*\)\s*;/;
+
+  let match = code.match(strictPattern);
+  if (!match) {
+    match = code.match(flexPattern);
+  }
 
   if (!match) {
     return { code, changed: 0 };

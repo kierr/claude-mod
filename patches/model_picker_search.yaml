@@ -9,9 +9,10 @@ status_tests:
   # Require the wrapper, keymap action and handler together.
   # A leading literal avoids scanning a marker-free baseline with an unbounded lookahead.
   applied: '__ModelSearchSelect__[\s\S]*"modelPicker:search"[\s\S]*modelPicker:search'
-  # applicable: the picker's Select call signature (structural, \w+ for the
-  # minified Select id) exists but no wrapper yet.
-  applicable: 'visibleOptionCount'
+  # applicable: requires keysDeferred prop on the Select component.
+  # This prop only exists in code-split versions (2.1.242+) where the
+  # model picker uses deferred keymaps. Not present in 2.1.181 monolithic.
+  applicable: 'keysDeferred'
 codemod:
   type: "node_script"
   engine: "babel"
