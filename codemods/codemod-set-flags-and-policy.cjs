@@ -4,14 +4,22 @@ const fs = require("fs");
 const path = require("path");
 
 // Flags that need object wrapping ({enabled: true, available: true}) instead of bare boolean.
-const OBJECT_WRAP_FLAGS = {
-  tengu_onyx_plover: { enabled: true, available: true },
-  tengu_herring_clock: { enabled: true, available: true },
-};
+// When the user sets these in mods.json as a plain boolean, we wrap to the object form
+// the upstream resolver expects. When the user sets them as an object, we pass it through.
+// RATIONALE: The upstream GrowthBook resolver returns objects for these flags; a bare
+// boolean override would be a type mismatch. The values come from mods.json, not hardcoded.
+const OBJECT_WRAP_FLAGS = ["tengu_onyx_plover", "tengu_herring_clock"];
 
 // Injected at the top of the GrowthBook resolver body (v0o).
 // Checks mods.json for feature_flags_* keys; if any match the requested flag,
 // return the override value immediately.
+// Known flag keys: tengu_passport_quail, tengu_session_memory, tengu_slate_thimble,
+//   tengu_billiard_aviary, tengu_kairos_loop_dynamic, tengu_kairos_push_notifications,
+//   tengu_kairos_loop_prompt, tengu_kairos_input_needed_push, tengu_kairos_loop_persistent,
+//   tengu_kairos_loop_keepalive, tengu_kairos_cron, tengu_kairos_cron_durable,
+//   tengu_amber_sentinel, tengu_onyx_plover, tengu_herring_clock,
+//   tengu_streaming_tool_execution2, tengu_coral_fern, tengu_ashen_kelp,
+//   tengu_destructive_command_warning, tengu_harbor, tengu_workflows_enabled
 function buildGrowthBookGuard(paramName) {
   return `if (typeof __isModEnabled__ === "function" && __isModEnabled__("set_flags_and_policy") && typeof __modsLoad__ === "function") {
     var __ff_cfg = __modsLoad__();
@@ -19,9 +27,14 @@ function buildGrowthBookGuard(paramName) {
       var __ff_fk = "feature_flags_" + ${paramName};
       if (__ff_fk in __ff_cfg) {
         var __ff_raw = __ff_cfg[__ff_fk];
-        var __ff_wrap = ${JSON.stringify(OBJECT_WRAP_FLAGS)};
-        if (__ff_raw && __ff_wrap[${paramName}]) {
-          return { value: __ff_wrap[${paramName}], source: "mod" };
+        // Object-wrap flags: upstream returns objects for these, so a boolean override
+        // must be wrapped. If the user provided an object, pass it through directly.
+        var __ff_wrap_keys = ${JSON.stringify(OBJECT_WRAP_FLAGS)};
+        if (__ff_raw === true && __ff_wrap_keys.indexOf(${paramName}) !== -1) {
+          return { value: { enabled: true, available: true }, source: "mod" };
+        }
+        if (__ff_raw && typeof __ff_raw === "object" && __ff_wrap_keys.indexOf(${paramName}) !== -1) {
+          return { value: __ff_raw, source: "mod" };
         }
         return { value: __ff_raw, source: "mod" };
       }
