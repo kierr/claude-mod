@@ -36,9 +36,11 @@ function isInsideModTernary(code, matchIndex) {
 /**
  * The coordinator rx() second guard: fn() && !fn() && !fn(process.env.CLAUDE_CODE_REMOTE).
  * Matches Gx() && !ya() && !rt(process.env.CLAUDE_CODE_REMOTE) with any minified names.
+ * Also matches code-split variant: fn() && !fn() && !fn(a.CLAUDE_CODE_REMOTE)
+ * where `a` is an imported module with env-like properties.
  */
 const GUARD_RE =
-  /[\w$]+\(\)\s*&&\s*![\w$]+\(\)\s*&&\s*![\w$]+\(\s*process\.env\.CLAUDE_CODE_REMOTE\s*\)/g;
+  /[\w$]+\(\)\s*&&\s*![\w$]+\(\)\s*&&\s*![\w$]+\(\s*(?:process\.env|\w+)\.CLAUDE_CODE_REMOTE\s*\)/g;
 
 function transform(code) {
   let changed = 0;
