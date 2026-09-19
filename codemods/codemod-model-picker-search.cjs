@@ -83,6 +83,7 @@ function discover(ast) {
     arCallPath: null,          // the inner createElement(Select, {options, ...}) call
     wtMemoPath: null,          // the IfStatement memo block wrapping the Ar call
     beMemoPath: null,         // the IfStatement memo block assigning `Be`
+    beDeclPath: null,         // the `let Be;` VariableDeclaration to remove on replace
     woCallPath: null,         // the Wo({...}, Be) call
     woName: null,             // Wo callee identifier
     keymapBindingsPath: null, // the `{ s: "modelPicker:thisSessionOnly" }` ObjectExpression
@@ -235,14 +236,20 @@ function discover(ast) {
   let beName = null;
   if (t.isIdentifier(woArg1)) beName = woArg1.name;
   if (beName) {
-    // Scan the picker function body for `let <beName>; if (t[N] === Symbol.for(...)) { <beName> = {context:"ModelPicker"}; ...}`
+    // Scan the picker function body for `let <beName>;` declaration.
+    // This is the separate VariableDeclaration above the IfStatement memo block.
     for (const stmt of pickerFn.node.body.body) {
       if (!t.isVariableDeclaration(stmt)) continue;
       const decl = stmt.declarations[0];
       if (!decl || !t.isIdentifier(decl.id, { name: beName })) continue;
-      // The following statement should be the IfStatement memo block.
-      // But the decl and the if are separate statements; find the if by scanning siblings.
-      // Simpler: traverse for the IfStatement whose consequent assigns beName = {context:"ModelPicker"}.
+      // Store the path so we can remove it when replacing the memo block.
+      // Find the corresponding VariableDeclaration path.
+      pickerFn.traverse({
+        VariableDeclaration(p) {
+          if (found.beDeclPath) return;
+          if (p.node === stmt) found.beDeclPath = p;
+        },
+      });
       break;
     }
     pickerFn.traverse({
@@ -703,6 +710,11 @@ function transform(ast) {
       ])
     ),
   ]);
+  // Remove the separate `let Be;` declaration if it exists — the replacement
+  // VariableDeclaration (`let Be = {...}`) subsumes it.
+  if (found.beDeclPath) {
+    found.beDeclPath.remove();
+  }
   found.beMemoPath.replaceWith(beDecl);
 
   // Add `"modelPicker:search"` handler to the Wo object literal (1st arg).
