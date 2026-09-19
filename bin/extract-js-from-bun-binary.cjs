@@ -375,15 +375,20 @@ function parseBunSection(sectionBuffer) {
  * Detect whether a parsed Bun section uses code-split ESM modules
  * (newer Bun versions) vs a single monolithic CJS IIFE (older versions).
  *
- * Code-split: entry point imports from "/$bunfs/root/chunk-*.js"
- * Monolithic: entry point is a single large CJS IIFE
+ * Monolithic: entry point has @bun-cjs header (CJS IIFE wrapper)
+ * Code-split: entry point has only @bun @bytecode (ESM), imports chunks
+ *
+ * Both formats can reference /$bunfs/root/ for asset modules — that
+ * alone is not a reliable indicator. The @bun-cjs header is the
+ * distinguishing feature: monolithic bundles wrap everything in a
+ * CJS IIFE, code-split bundles use ESM imports.
  */
 function isCodeSplit(parsed) {
   const entry = parsed.modules[parsed.entryPointId];
   if (!entry || !entry.content) return false;
-  // Code-split entry points import from /$bunfs/root/chunk-*.js
-  // Matches both: import{X}from"/$bunfs/root/..." and import("/$bunfs/root/...")
-  return entry.content.includes("/$bunfs/root/");
+  // Monolithic = @bun-cjs header present → NOT code-split
+  // Code-split = only @bun @bytecode → IS code-split
+  return !entry.content.includes("@bun-cjs");
 }
 
 /**
