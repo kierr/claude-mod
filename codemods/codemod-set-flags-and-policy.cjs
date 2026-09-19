@@ -60,16 +60,18 @@ function buildPolicyGuard(paramName) {
 // matchFn receives the text from the function start and should return the param name
 // if the anchor is found, or null otherwise.
 function findFunctionByAnchor(code, anchorPattern, anchorWindow) {
-  // Search for the anchor string, then walk backward to find the enclosing function.
+  // Search for the anchor string, then walk backward to find the enclosing function/method.
   let searchFrom = 0;
   while (true) {
     const anchorIdx = code.indexOf(anchorPattern, searchFrom);
     if (anchorIdx === -1) return null;
-    // Walk backward to find the function declaration that encloses this anchor.
-    // Look for "function NAME(PARAM) {" before the anchor, within anchorWindow chars.
+    // Walk backward to find the function declaration or class method that encloses this anchor.
+    // Look for "function NAME(PARAM) {" or "methodName(PARAM) {" before the anchor,
+    // within anchorWindow chars.
     const windowStart = Math.max(0, anchorIdx - anchorWindow);
     const before = code.substring(windowStart, anchorIdx);
-    // Find the last "function NAME(PARAM) {" before the anchor
+
+    // Try function declarations first (more specific pattern)
     const funcPattern = /function\s+([\w$]+)\s*\(\s*([\w$]+)\s*\)\s*\{/g;
     let lastMatch = null;
     let m;
@@ -82,6 +84,22 @@ function findFunctionByAnchor(code, anchorPattern, anchorWindow) {
       const bodyBrace = funcStart + lastMatch[0].length - 1; // position of {
       return { funcStart, paramName, bodyBrace, anchorIdx };
     }
+
+    // Try class method syntax: methodName(param) { or methodName(param1, param2) {
+    // Must be preceded by newline/whitespace to avoid matching obj.method() calls
+    const methodPattern = /(?:^|\n)\s*([\w$]+)\s*\(\s*([\w$]+(?:\s*,\s*[\w$]+)*)\s*\)\s*\{/g;
+    let lastMethod = null;
+    while ((m = methodPattern.exec(before)) !== null) {
+      lastMethod = m;
+    }
+    if (lastMethod) {
+      const funcStart = windowStart + lastMethod.index + (lastMethod[0].match(/^\s*/)?.[0]?.length || 0);
+      // For methods with multiple params, use the first param as the flag name param
+      const paramName = lastMethod[2].split(",")[0].trim();
+      const bodyBrace = windowStart + lastMethod.index + lastMethod[0].lastIndexOf("{");
+      return { funcStart, paramName, bodyBrace, anchorIdx };
+    }
+
     searchFrom = anchorIdx + 1;
   }
 }

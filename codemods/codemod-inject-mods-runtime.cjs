@@ -65,7 +65,8 @@ function transform(code) {
   const match = code.match(wrapperPattern);
 
   if (!match) {
-    console.error("Warning: could not find injection target (no CJS wrapper); skipping mods runtime injection.");
+    // No CJS wrapper — ESM code-split binary. The runtime helpers
+    // will be injected by the pipeline into cli.js instead.
     return { code, changed: 0 };
   }
 

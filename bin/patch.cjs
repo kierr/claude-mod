@@ -191,8 +191,52 @@ function fixBunCjsWrapper(patchedPath, codeSplit = false) {
         // Remove any @bun header lines from the beginning
         content = content.replace(/^(\/\/ @bun[^\n]*\r?\n)+/, "");
         content = "#!/usr/bin/env bun\n" + content;
-        fs.writeFileSync(entryPath, content);
       }
+      // Inject mods runtime helpers for ESM (no CJS wrapper to inject into).
+      // Uses Bun's built-in require() which works in both CJS and ESM contexts.
+      if (!content.includes("function __modsLoad__()")) {
+        const { transform: runtimeTransform } = require("../codemods/codemod-inject-mods-runtime.cjs");
+        const esmHelper = `
+var __mods_cache__ = null;
+var __mods_cache_time__ = 0;
+function __modsLoad__() {
+  var fs = require("fs");
+  var path = require("path");
+  var os = require("os");
+  var now = Date.now();
+  if (__mods_cache__ && (now - __mods_cache_time__) < 2000) {
+    return __mods_cache__;
+  }
+  try {
+    var configPath = path.join(
+      process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"),
+      "mods.json"
+    );
+    var data = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    __mods_cache__ = data;
+    __mods_cache_time__ = now;
+    return data;
+  } catch (e) {
+    __mods_cache__ = {};
+    __mods_cache_time__ = now;
+    return __mods_cache__;
+  }
+}
+function __isModEnabled__(id) {
+  return __modsLoad__()[id] === true;
+}
+function __getModConfig__(id, key, fallback) {
+  var config = __modsLoad__();
+  if (config[id] !== true) return undefined;
+  var val = config[id + "_" + key];
+  return val !== undefined ? val : fallback;
+}
+`;
+        // Insert after the shebang line
+        const shebangEnd = content.indexOf("\n") + 1;
+        content = content.substring(0, shebangEnd) + esmHelper + content.substring(shebangEnd);
+      }
+      fs.writeFileSync(entryPath, content);
       fs.chmodSync(entryPath, 0o755);
     }
 
@@ -803,14 +847,14 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
     throw new Error(`Chunks directory not found for code-split binary: ${chunksDir}`);
   }
 
-  // Collect all .js chunk files in the deobfuscated chunks directory
+  // Collect all .js chunk files and cli.js in the deobfuscated chunks directory
   const chunkFiles = [];
   function collectJsFiles(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         collectJsFiles(fullPath);
-      } else if (entry.name.endsWith(".js") && entry.name.startsWith("chunk-")) {
+      } else if (entry.name.endsWith(".js") && (entry.name.startsWith("chunk-") || entry.name === "cli.js")) {
         chunkFiles.push(fullPath);
       }
     }
