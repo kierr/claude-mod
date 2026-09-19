@@ -698,6 +698,11 @@ function deobfuscate(cliPath, verbose = false, codeSplit = false) {
       "Bun.embeddedFiles",
       "auto_dream",
       "model-default",
+      // Additional anchors for code-split codemod coverage
+      "lastApiCompletionTimestamp",
+      "Old tool result content cleared",
+      "CLAUDE_CODE_DISABLE_ADVISOR_TOOL",
+      "allow_remote_sessions",
     ];
 
     // Find chunks containing any patch anchor

@@ -7,7 +7,7 @@ file_id: "cli"
 
 status_tests:
   applied: '__mct_patched__'
-  applicable: 'tengu_hazel_osprey'
+  applicable: 'tengu_hazel_osprey|Old tool result content cleared'
 
 codemod:
   type: "node_script"
