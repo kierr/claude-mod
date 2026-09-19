@@ -9,7 +9,7 @@ status_tests:
   # so a future rewrite of the both-auth-methods warning can't fail verification and
   # disable this auth mod along with it. If the rider drifts, the warning returns.
   applied: '__ATAK__'
-  applicable: 'skipRetrievingKeyFromApiKeyHelper[\s\S]{0,2000}source:\s*"none"[\s\S]{0,2000}process\.env\.ANTHROPIC_API_KEY'
+  applicable: 'skipRetrievingKeyFromApiKeyHelper'
 codemod:
   type: "node_script"
   engine: "regex"

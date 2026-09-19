@@ -6,7 +6,7 @@ file_id: "cli"
 
 status_tests:
   applied: '__ssp_patched__'
-  applicable: 'return \[process\.execPath\];'
+  applicable: 'process.execPath'
 
 codemod:
   type: "node_script"

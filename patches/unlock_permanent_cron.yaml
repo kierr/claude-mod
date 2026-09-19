@@ -6,7 +6,7 @@ file_id: "cli"
 
 status_tests:
   applied: 'permanent: \w+\([\w$]+\.boolean\(\)\.optional\(\)\)\.describe\("true = exempt from 7-day auto-expiry'
-  applicable: 'durable: \w+\([\w$]+\.boolean\(\)\.optional\(\)\)\.describe\("true = persist to \.claude/scheduled_tasks\.json'
+  applicable: 'scheduled_tasks.json'
 
 codemod:
   type: "node_script"

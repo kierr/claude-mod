@@ -7,7 +7,7 @@ order: 98
 
 status_tests:
   applied: 'title:\s*"Environment"'
-  applicable: 'title:\s*"Stats"'
+  applicable: 'title: "Stats"'
 
 codemod:
   type: "node_script"

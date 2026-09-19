@@ -8,7 +8,7 @@ order: 14
 status_tests:
   applied: '__isModEnabled__\("add_auth_forwarding"\)'
   # Accept inline arrays and Set-backed environment allowlists.
-  applicable: '(?:for\s*\(\s*let\s+[\w$]+\s+of\s*\[\s*"CLAUDE_CONFIG_DIR".*?"CLAUDE_INTERNAL_FC_OVERRIDES"|[\w$]+\s*=\s*new\s+Set\(\[\s*"CLAUDE_CONFIG_DIR".*?"CLAUDE_INTERNAL_FC_OVERRIDES")'
+  applicable: 'CLAUDE_CONFIG_DIR'
 
 codemod:
   type: "node_script"

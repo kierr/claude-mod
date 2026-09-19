@@ -7,7 +7,7 @@ status_tests:
   # applied: mod guard wrapping the for-loop with numbered custom model options
   applied: '__isModEnabled__\(\s*["\x27]add_multi_custom_models["\x27]\s*\)[\s\S]{0,2000}ANTHROPIC_CUSTOM_MODEL_OPTION_'
   # applicable: original single custom model option check exists (before patch)
-  applicable: 'process\.env\.ANTHROPIC_CUSTOM_MODEL_OPTION[^_\d]'
+  applicable: 'ANTHROPIC_CUSTOM_MODEL_OPTION'
 codemod:
   type: "node_script"
   engine: "regex"

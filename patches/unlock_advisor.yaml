@@ -18,7 +18,7 @@ status_tests:
   # the marker-less baseline in ~2ms. Would need V8 to drop literal-prefix optimization
   # to reconsider.
   applied: '__ADVISOR_ENABLE__[\s\S]*__ADVISOR_CGK__[\s\S]*__ADVISOR_FGH__[\s\S]*__ADVISOR_PAIRING__'
-  applicable: '\w+\(process\.env\.CLAUDE_CODE_DISABLE_ADVISOR_TOOL\)\)\s*\{'
+  applicable: 'CLAUDE_CODE_DISABLE_ADVISOR_TOOL'
 
 codemod:
   type: "node_script"

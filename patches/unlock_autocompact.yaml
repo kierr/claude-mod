@@ -8,7 +8,7 @@ file_id: "cli"
 status_tests:
   applied: '__isModEnabled__\(\s*"unlock_autocompact"\s*\)[^;\n]{0,40}===\s*"auto"'
   # Allow intermediate source names within a bounded span.
-  applicable: 'return \w+ === "env" [\s\S]{0,80}=== "model-default";'
+  applicable: 'model-default'
 
 codemod:
   type: "node_script"

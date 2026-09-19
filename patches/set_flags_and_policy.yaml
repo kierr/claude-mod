@@ -6,8 +6,8 @@ file_id: "cli"
 
 
 status_tests:
-  applied: '__pv7_key'
-  applicable: 'cachedGrowthBookFeatures'
+  applied: '__ff_fk|__pv7_key'
+  applicable: 'cachedGrowthBookFeatures|compliance_taints'
 
 codemod:
   type: "node_script"

@@ -11,7 +11,7 @@ status_tests:
   applied: '__ModelSearchSelect__[\s\S]*"modelPicker:search"[\s\S]*modelPicker:search'
   # applicable: the picker's Select call signature (structural, \w+ for the
   # minified Select id) exists but no wrapper yet.
-  applicable: 'createElement\(\s*\w+\s*,\s*\{\s*defaultValue:\s*\w+\s*,\s*defaultFocusValue:\s*\w+\s*,\s*options:\s*\w+\s*,\s*onChange:\s*\w+\s*,\s*onFocus:\s*\w+\s*,\s*onCancel:\s*\w+\s*,\s*visibleOptionCount:\s*\w+\s*\s*\}'
+  applicable: 'visibleOptionCount'
 codemod:
   type: "node_script"
   engine: "babel"

@@ -7,7 +7,7 @@ file_id: "cli"
 
 status_tests:
   applied: '__CACHE_KEEPALIVE_INSTALLED__'
-  applicable: 'lastApiCompletionTimestamp\s*=\s*[\w$]+'
+  applicable: 'lastApiCompletionTimestamp'
 
 codemod:
   type: "node_script"

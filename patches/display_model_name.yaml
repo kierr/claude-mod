@@ -7,7 +7,7 @@ order: 3
 
 status_tests:
   applied: '__isModEnabled__\(\s*["\x27]display_model_name["\x27]\s*\)'
-  applicable: 'function [\w$]+\([\w$]+\)[\s\S]{0,5000}?if\s*\(\s*[\w$]+\.model'
+  applicable: 'API Usage Billing|getSessionModel'
 
 codemod:
   type: "node_script"

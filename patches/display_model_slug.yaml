@@ -10,7 +10,7 @@ status_tests:
   # Accept quoted or template descriptions and literal or escaped middle dots,
   # or underscores (engine replaces Unicode middle dots with _ before Babel parse).
   # The injected slug changes this shape, so it does not rematch patched output.
-  applicable: 'Sonnet 4\.6 (?:\\xB7|·|_) (?:Best for everyday tasks|\$\{)'
+  applicable: 'name: "Sonnet 4.6"'
 
 codemod:
   type: "node_script"

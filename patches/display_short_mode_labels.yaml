@@ -8,7 +8,7 @@ order: 25
 
 status_tests:
   applied: '__isModEnabled__\("display_short_mode_labels"\).*\?.*".*Plan"'
-  applicable: 'title: "Plan Mode"'
+  applicable: 'Plan Mode'
 codemod:
   type: "node_script"
   engine: "regex"

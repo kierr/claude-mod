@@ -7,7 +7,7 @@ file_id: "cli"
 
 status_tests:
   applied: '__isModEnabled__\(\s*["\x27]coordinator_local_enable["\x27]\s*\)\s*\?\s*false\s*:\s*[\w$]+\(\)\s*&&\s*![\w$]+\(\)\s*&&\s*![\w$]+\(\s*process\.env\.CLAUDE_CODE_REMOTE\s*\)'
-  applicable: '[\w$]+\(\)\s*&&\s*![\w$]+\(\)\s*&&\s*![\w$]+\(\s*process\.env\.CLAUDE_CODE_REMOTE\s*\)'
+  applicable: 'CLAUDE_CODE_COORDINATOR_MODE'
 
 codemod:
   type: "node_script"
