@@ -3,6 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { skipStringOrComment, findMatchingBrace, findMatchingParen } = require("./scan-helpers.cjs");
 
 const MOD_ID = "model_capabilities_refresh";
 
@@ -66,18 +67,12 @@ function transform(code) {
     pos += 2;
     pos = skipWs(pos);
     if (code[pos] !== "(") break;
-    pos++;
-
-    // Extract the test expression — find the matching close paren
-    let depth = 1;
-    let testStart = pos;
-    while (pos < code.length && depth > 0) {
-      if (code[pos] === "(") depth++;
-      else if (code[pos] === ")") depth--;
-      pos++;
-    }
-    const testEnd = pos - 1;
+    const parenEnd = findMatchingParen(code, pos);
+    if (parenEnd === -1) break;
+    const testStart = pos + 1;
+    const testEnd = parenEnd;
     const testExpr = code.substring(testStart, testEnd).trim();
+    pos = parenEnd + 1;
 
     // Verify this is a 0-arg call guard: IDENT() or !IDENT()
     const guardMatch = testExpr.match(/^(!?)([\w$]+)\(\)$/) ||
@@ -99,18 +94,12 @@ function transform(code) {
       consequentEnd = semiIdx + 1;
       isBareReturn = true;
     } else if (code[pos] === "{") {
-      // Block consequent — find matching brace
-      let braceDepth = 1;
-      let bp = pos + 1;
-      while (bp < code.length && braceDepth > 0) {
-        if (code[bp] === "{") braceDepth++;
-        else if (code[bp] === "}") braceDepth--;
-        bp++;
-      }
-      // Verify it's { return; }
-      const block = code.substring(pos + 1, bp - 1).trim();
+      // Block consequent — find matching brace (string/comment-aware)
+      const braceEnd = findMatchingBrace(code, pos);
+      if (braceEnd === -1) break;
+      const block = code.substring(pos + 1, braceEnd).trim();
       if (block !== "return;") break;
-      consequentEnd = bp;
+      consequentEnd = braceEnd + 1;
     } else {
       break;
     }

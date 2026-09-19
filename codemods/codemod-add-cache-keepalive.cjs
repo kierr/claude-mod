@@ -3,6 +3,7 @@
 // These off-transcript requests can incur provider charges; the mod is default-off.
 
 const fs = require("fs");
+const { findMatchingBrace } = require("./scan-helpers.cjs");
 const path = require("path");
 
 const MOD_ID = "add_cache_keepalive";
@@ -207,13 +208,8 @@ function transform(code) {
       }
     }
     if (funcBraceStart !== -1) {
-      // Find matching closing brace
-      depth = 1;
-      let funcBraceEnd = -1;
-      for (let i = funcBraceStart + 1; i < code.length; i++) {
-        if (code[i] === '{') depth++;
-        if (code[i] === '}') { depth--; if (depth === 0) { funcBraceEnd = i; break; } }
-      }
+      // Find matching closing brace (string/comment-aware)
+      const funcBraceEnd = findMatchingBrace(code, funcBraceStart);
       if (funcBraceEnd !== -1) {
         edits.push({ index: funcBraceEnd + 1, type: "insert_after", text: "\n" + MODULE_SOURCE + "\n" });
         moduleInserted = true;

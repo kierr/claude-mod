@@ -4,6 +4,7 @@ const MOD_ID = "add_multi_custom_models";
 
 const fs = require("fs");
 const path = require("path");
+const { findMatchingBrace } = require("./scan-helpers.cjs");
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -51,14 +52,9 @@ function transform(code) {
     const braceStart = code.indexOf("{", ifStart);
     if (braceStart === -1) continue;
 
-    // Find matching closing brace
-    let depth = 1;
-    let braceEnd = -1;
-    for (let i = braceStart + 1; i < code.length; i++) {
-      if (code[i] === '{') depth++;
-      if (code[i] === '}') { depth--; if (depth === 0) { braceEnd = i; break; } }
-    }
-    if (braceEnd === -1) continue;
+  // Find matching closing brace (string/comment-aware)
+  const braceEnd = findMatchingBrace(code, braceStart);
+  if (braceEnd === -1) continue;
 
     const ifBody = code.substring(braceStart + 1, braceEnd);
 

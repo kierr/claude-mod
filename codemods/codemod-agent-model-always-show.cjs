@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { findMatchingBrace } = require("./scan-helpers.cjs");
 
 const MOD_ID = "display_model_name";
 
@@ -67,14 +68,9 @@ function transform(code) {
     }
     if (funcBraceStart === -1) continue;
 
-    // Find matching closing brace
-    let funcBraceEnd = -1;
-    depth = 1;
-    for (let i = funcBraceStart + 1; i < code.length; i++) {
-      if (code[i] === '{') depth++;
-      if (code[i] === '}') { depth--; if (depth === 0) { funcBraceEnd = i; break; } }
-    }
-    if (funcBraceEnd === -1) continue;
+  // Find matching closing brace (string/comment-aware)
+  let funcBraceEnd = findMatchingBrace(code, funcBraceStart);
+  if (funcBraceEnd === -1) continue;
 
     const funcBlock = code.substring(funcBraceStart, funcBraceEnd + 1);
 
