@@ -42,13 +42,32 @@ function isInsideModTernary(code, matchIndex) {
 const GUARD_RE =
   /[\w$]+\(\)\s*&&\s*![\w$]+\(\)\s*&&\s*![\w$]+\(\s*(?:process\.env|\w+)\.CLAUDE_CODE_REMOTE\s*\)/g;
 
+/**
+ * Code-split variant: the guard is a simple if-block.
+ *   if (a.CLAUDE_CODE_REMOTE === true) return <something>;
+ * Or equivalently:
+ *   if(a.CLAUDE_CODE_REMOTE===!0)return <something>
+ * We wrap the condition so the mod returns false (don't-block) when enabled:
+ *   if ((typeof __isModEnabled__ === "function" && __isModEnabled__("coordinator_local_enable") ? false : a.CLAUDE_CODE_REMOTE === true)) return <something>;
+ */
+const GUARD_RE_CODESPLIT = /if\s*\(\s*([\w$]+\.CLAUDE_CODE_REMOTE\s*===\s*(?:true|!0))\s*\)\s*return/g;
+
 function transform(code) {
   let changed = 0;
 
+  // Try monolithic pattern first
   code = code.replace(GUARD_RE, (m, offset) => {
     if (isInsideModTernary(code, offset)) return m;
     changed += 1;
     return wrapFalse(m);
+  });
+
+  // Try code-split pattern: wrap the condition in the if-block
+  code = code.replace(GUARD_RE_CODESPLIT, (m, condition) => {
+    // Idempotency: if already wrapped, skip
+    if (m.includes("__isModEnabled__")) return m;
+    changed += 1;
+    return `if (${wrapFalse(condition)}) return`;
   });
 
   return { code, changed };

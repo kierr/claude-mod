@@ -101,3 +101,39 @@ function thirdSite() { return rt(process.env.CLAUDE_CODE_REMOTE) ? "x" : "y"; }
     expect(changed).toBe(0);
   }, TIMEOUT);
 });
+
+/**
+ * Code-split fixture — reflects the actual code-split structure from 2.1.277
+ * where the guard is a simple if-block with property access.
+ */
+function buildCodeSplitFixture() {
+  return `function gs(){if(dUe()?.live)return;if(a.CLAUDE_CODE_REMOTE===!0)return Oee()===void 0?"no-container-address":void 0;return"rc-disconnected"}`;
+}
+
+describe("codemod-coordinator-local-enable code-split", () => {
+  it("wraps the code-split if-block guard with a mod ternary", () => {
+    const { code: out, changed } = transform(buildCodeSplitFixture());
+    expect(changed).toBe(1);
+    expect(out).toContain('__isModEnabled__("coordinator_local_enable") ? false : a.CLAUDE_CODE_REMOTE===!0');
+  }, TIMEOUT);
+
+  it("preserves the return statement after the guard", () => {
+    const { code: out } = transform(buildCodeSplitFixture());
+    // The return and its content should still be present
+    expect(out).toContain('return Oee()===void 0');
+  }, TIMEOUT);
+
+  it("is idempotent on code-split structure", () => {
+    const once = transform(buildCodeSplitFixture()).code;
+    const { code: twice, changed } = transform(once);
+    expect(changed).toBe(0);
+    expect(twice).toBe(once);
+  }, TIMEOUT);
+
+  it("mod-disabled preserves original code-split semantics", () => {
+    const { code: out } = transform(buildCodeSplitFixture());
+    // When mod is disabled, __isModEnabled__ returns falsy → ternary yields
+    // the original condition a.CLAUDE_CODE_REMOTE===!0
+    expect(out).toMatch(/\? false : a\.CLAUDE_CODE_REMOTE===!0\)\) return/);
+  }, TIMEOUT);
+});
