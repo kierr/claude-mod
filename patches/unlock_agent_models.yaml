@@ -13,7 +13,7 @@ status_tests:
   # " -> ` in 2.1.178 and rewrites the describe text often, which previously made
   # this test (and the whole patch) silently not-applicable. The enum+.optional()
   # shape is the structural contract the codemod relies on, so it is the right anchor.
-  applicable: 'agent_model|agentModel|enum\(\["sonnet"'
+  applicable: 'agent_model|agentModel|enum\(\["sonnet"|Optional model override'
 
 codemod:
   type: "node_script"
