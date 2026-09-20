@@ -896,7 +896,6 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
     "mods_runtime",
     "remove_attribution",
     "unlock_agent_models",
-    "add_multi_custom_models",
     "add_cache_keepalive",
     "unlock_permanent_cron",
     "unlock_models",
@@ -905,8 +904,6 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
   // remove_attribution: Babel parser fails on large code-split chunks (SyntaxError)
   // unlock_agent_models: code-split has no .enum(["sonnet"..."haiku"]) for agent model
   //   validation — uses provider lookup (KLr) and type matching (R2) instead
-  // add_multi_custom_models: code-split doesn't use the custom model insertion
-  //   pattern (no .optional().default("sonnet") on a model field)
   // add_cache_keepalive: 5 injection sites scattered across chunks with
   //   cross-chunk dependencies; needs per-chunk injection strategy
   // unlock_permanent_cron: addCronTask doesn't exist in 2.1.277; API changed entirely

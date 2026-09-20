@@ -34,17 +34,22 @@ function transform(code) {
   const modGuard = `typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")`;
 
   // --- Picker transform ---
-  // Find: let VAR = process.env.ANTHROPIC_CUSTOM_MODEL_OPTION;
-  //       if (VAR && !ARR.some(CB => CB.value === VAR)) { ARR.push({ value: VAR, label: VAR, description: "Custom model (" + VAR + ")" }); }
-  // Insert after: if (modGuard) { for (let _i = 1; _i <= 20; _i++) { ... ARR.push(...) ... } }
-
-  const pickerPattern = /let\s+([\w$]+)\s*=\s*process\.env\.ANTHROPIC_CUSTOM_MODEL_OPTION\s*;\s*if\s*\(\s*([\w$]+)\s*&&\s*!([\w$]+)\.some\s*\(\s*([\w$]+)\s*=>\s*([\w$]+)\.value\s*===\s*([\w$]+)\s*\)\s*\)\s*\{/g;
+  // Monolithic: let VAR = process.env.ANTHROPIC_CUSTOM_MODEL_OPTION;
+  //   if (VAR && !ARR.some(CB => CB.value === VAR)) { ARR.push({ value: VAR, label: VAR, description: "Custom model (" + VAR + ")" }); }
+  // Code-split: let VAR = a.ANTHROPIC_CUSTOM_MODEL_OPTION;
+  //   if (VAR && !ARR.some(CB => CB.value === VAR)) { ARR.push({ value: VAR, label: a.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME ?? ... ?? VAR, ... }); }
+  // The env accessor is either `process.env` or a module namespace like `a`
+  const envAccessor = /(?:process\.env|[\w$]+)\.ANTHROPIC_CUSTOM_MODEL_OPTION/;
+  const pickerPattern = new RegExp(
+    `let\\s+([\\w$]+)\\s*=\\s*(${envAccessor.source})\\s*;\\s*if\\s*\\(\\s*([\\w$]+)\\s*&&\\s*!([\\w$]+)\\.some\\s*\\(\\s*([\\w$]+)\\s*=>\\s*([\\w$]+)\\.value\\s*===\\s*([\\w$]+)\\s*\\)\\s*\\)\\s*\\{`, 'g'
+  );
 
   let pickerMatch;
   while ((pickerMatch = pickerPattern.exec(code)) !== null) {
-    const envVar = pickerMatch[1];
-    const condVar = pickerMatch[2];  // should match envVar
-    const pickerArr = pickerMatch[3];
+    const envVar = pickerMatch[1];   // the let variable
+    const envNs = pickerMatch[2];     // process.env or a
+    const condVar = pickerMatch[3];   // should match envVar
+    const pickerArr = pickerMatch[4]; // the array being checked
 
     // Verify the if-block body has the right push structure
     // Find the end of this if-block
@@ -58,12 +63,25 @@ function transform(code) {
 
     const ifBody = code.substring(braceStart + 1, braceEnd);
 
-    // Verify the body contains: ARR.push({ value: ..., label: ..., description: "Custom model (" + ... + ")" })
+    // Verify the body contains: ARR.push({ value: ..., label: ..., description: ... })
     if (!ifBody.includes(`${pickerArr}.push`)) continue;
     if (!ifBody.includes("label:") || !ifBody.includes("description:")) continue;
 
+    // Determine the env accessor for the for-loop injection.
+    // Monolithic: process.env[KEY] — code-split: a[KEY]
+    const isProcessEnv = envNs === "process.env";
+    const envRead = isProcessEnv
+      ? "process.env[_envKey]"
+      : envNs.split(".")[0] + "[_envKey]"; // a[_envKey] for code-split
+    const envReadName = isProcessEnv
+      ? "process.env[_envKey + \"_NAME\"]"
+      : envNs.split(".")[0] + "[_envKey + \"_NAME\"]";
+    const envReadDesc = isProcessEnv
+      ? "process.env[_envKey + \"_DESCRIPTION\"]"
+      : envNs.split(".")[0] + "[_envKey + \"_DESCRIPTION\"]";
+
     // Build the picker for-loop
-    const pickerLoop = `if (${modGuard}) { for (let _i = 1; _i <= 20; _i++) { let _envKey = "ANTHROPIC_CUSTOM_MODEL_OPTION_" + _i; let _modelId = process.env[_envKey]; if (_modelId && !${pickerArr}.some(_A => _A.value === _modelId)) { ${pickerArr}.push({ value: _modelId, label: process.env[_envKey + "_NAME"] ?? _modelId, description: process.env[_envKey + "_DESCRIPTION"] ?? "Custom model (" + _modelId + ")" }); } } }`;
+    const pickerLoop = `if (${modGuard}) { for (let _i = 1; _i <= 20; _i++) { let _envKey = "ANTHROPIC_CUSTOM_MODEL_OPTION_" + _i; let _modelId = ${envRead}; if (_modelId && !${pickerArr}.some(_A => _A.value === _modelId)) { ${pickerArr}.push({ value: _modelId, label: ${envReadName} ?? _modelId, description: ${envReadDesc} ?? "Custom model (" + _modelId + ")" }); } } }`;
 
     // Insert after the closing brace of the if-block
     code = code.substring(0, braceEnd + 1) + "\n" + pickerLoop + code.substring(braceEnd + 1);
@@ -75,15 +93,22 @@ function transform(code) {
   }
 
   // --- Validator transform ---
-  // Find: if (VAR === process.env.ANTHROPIC_CUSTOM_MODEL_OPTION) { return { valid: true }; }
-  const validatorPattern = /if\s*\(\s*([\w$]+)\s*===\s*process\.env\.ANTHROPIC_CUSTOM_MODEL_OPTION\s*\)\s*\{\s*return\s*\{\s*valid\s*:\s*true\s*\}\s*;\s*\}/g;
+  // Monolithic: if (VAR === process.env.ANTHROPIC_CUSTOM_MODEL_OPTION) { return { valid: true }; }
+  // Code-split: let VAR = a.ANTHROPIC_CUSTOM_MODEL_OPTION; if (VAR !== undefined && FN(VAR) === e) { return true; }
+  const validatorPattern = /if\s*\(\s*([\w$]+)\s*===\s*(?:process\.env|[\w$]+)\.ANTHROPIC_CUSTOM_MODEL_OPTION\s*\)\s*\{\s*return\s*\{\s*valid\s*:\s*true\s*\}\s*;\s*\}/g;
 
   let validatorMatch;
   while ((validatorMatch = validatorPattern.exec(code)) !== null) {
     const modelVar = validatorMatch[1];
 
+    // Detect env accessor from context
+    const validatorContext = code.slice(Math.max(0, validatorMatch.index - 500), validatorMatch.index);
+    const codeSplitAccessor = validatorContext.match(/([\w$]+)\.ANTHROPIC_CUSTOM_MODEL_OPTION/);
+    const isProcessEnv = !codeSplitAccessor || codeSplitAccessor[1] === 'process';
+    const envRead = isProcessEnv ? 'process.env[_envKey]' : (codeSplitAccessor[1] + '[_envKey]');
+
     // Build the validator for-loop
-    const validatorLoop = `if (${modGuard}) { for (let _i = 1; _i <= 20; _i++) { let _envKey = "ANTHROPIC_CUSTOM_MODEL_OPTION_" + _i; if (${modelVar} === process.env[_envKey]) { return { valid: true }; } } }`;
+    const validatorLoop = `if (${modGuard}) { for (let _i = 1; _i <= 20; _i++) { let _envKey = "ANTHROPIC_CUSTOM_MODEL_OPTION_" + _i; if (${modelVar} === ${envRead}) { return { valid: true }; } } }`;
 
     // Insert after the closing brace of the if-block
     const braceEnd = validatorMatch.index + validatorMatch[0].length - 1;
