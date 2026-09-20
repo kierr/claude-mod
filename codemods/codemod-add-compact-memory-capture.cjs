@@ -23,43 +23,94 @@ const CAPTURE_PROMPT =
 /**
  * Locate the summary call, its context, and the message factory by stable keys.
  * Return null unless every required binding and insertion point is found.
+ *
+ * Supports both monolithic (2.1.181) and code-split (2.1.277+) bundles.
+ * Code-split may wrap the call site in extra try/if blocks and has more
+ * function parameters than the monolithic version.
  */
 function discoverCompactVars(code) {
-  // (1) Injection site + summary-call locals. The combination of
-  //     querySource:"compact" + forkLabel:"compact" + maxTurns:1 is globally
-  //     unique to the compaction summary fork. The `try {\n<indent>` before it
-  //     is the insertion point (matched via lookahead so the original `let`
-  //     statement is preserved verbatim).
-  const callSiteRe =
-    /try \{\n(\s+)(?=let ([\w$]+) = await ([\w$]+)\(\{\n\s+promptMessages: \[([\w$]+)\],\n\s+cacheSafeParams: ([\w$]+),\n\s+canUseTool: ([\w$]+)\(\),\n\s+querySource: "compact",\n\s+forkLabel: "compact",\n\s+maxTurns: 1,)/;
-  const callSite = callSiteRe.exec(code);
-  if (!callSite) return null;
-  const indent = callSite[1];
-  const callee = callSite[3]; // runForkedAgent (mG)
-  const cacheSafeParams = callSite[5]; // T
-  // callSite[2] = summary result var, [4] = promptMessages local, [6] = cp8
+  // Strategy: find the unique anchor `forkLabel: "compact"` near
+  // `querySource: "compact"` and `maxTurns: 1`, then discover the surrounding
+  // call-site structure (callee, promptMessages, cacheSafeParams, canUseTool)
+  // and the outer function signature (context, preCompactTokenCount, cacheSafeParams).
 
-  // (2) streamCompactSummary signature -> context (K) + preCompactTokenCount (O).
-  //     Destructured param keys are stable (they mirror the typed signature).
-  const sigRe =
-    /async function [\w$]+\(\{\n\s+messages: [\w$]+,\n\s+summaryRequest: [\w$]+,\n\s+appState: [\w$]+,\n\s+context: ([\w$]+),\n\s+preCompactTokenCount: ([\w$]+),\n\s+cacheSafeParams: ([\w$]+),/;
-  const sig = sigRe.exec(code);
-  if (!sig) return null;
-  const context = sig[1]; // K
-  const preCompactTokenCount = sig[2]; // O
+  // (1) Find the call site anchor: querySource:"compact" + forkLabel:"compact" + maxTurns:1
+  //     These three together are globally unique to the compaction summary fork.
+  const callAnchorRe =
+    /promptMessages: \[([\w$]+)\],\n\s+cacheSafeParams: ([\w$]+),\n\s+canUseTool: ([\w$]+)\(\),\n\s+querySource: "compact",\n\s+forkLabel: "compact",\n\s+maxTurns: 1,/;
+  const callAnchor = callAnchorRe.exec(code);
+  if (!callAnchor) return null;
+  const promptMessagesLocal = callAnchor[1];
+  const cacheSafeParams = callAnchor[2];
+  const canUseToolFn = callAnchor[3];
+
+  // Find the `await CALLEE({` that precedes the call anchor.
+  // Search backwards from the anchor for `await <ident>({`
+  const anchorStart = callAnchor.index;
+  const preceding = code.slice(Math.max(0, anchorStart - 500), anchorStart);
+  const calleeRe = /await ([\w$]+)\(\{\n\s*$/;
+  const calleeMatch = calleeRe.exec(preceding);
+  if (!calleeMatch) return null;
+  const callee = calleeMatch[1];
+
+  // Find the `try {` indentation for the injection point.
+  // The injection goes before the inner `try` that wraps the await call.
+  // In code-split this inner `try` may be inside an `if (B) { try {` block.
+  // We match the `try {\n<indent>` immediately before `let X = await callee({`
+  const tryRe = new RegExp(
+    '(try [{]\\n)(\\s+)(?=let [\\w$]+ = await ' + callee + '[(][{])'
+  );
+  const tryMatch = tryRe.exec(code);
+  if (!tryMatch) return null;
+  const indent = tryMatch[2];
+  const injectionIndex = tryMatch.index;
+  const injectionRaw = tryMatch[0]; // "try {\n<indent>"
+
+  // (2) Find the function signature containing preCompactTokenCount and cacheSafeParams.
+  //     We must find the one that CONTAINS the call site. Search backwards from
+  //     the call anchor for the nearest `async function` with these destructured params.
+  //     Multiple functions may have these params (code-split has several compaction
+  //     functions), so we anchor to the one wrapping our call site.
+  const anchorEnd = callAnchor.index + callAnchor[0].length;
+  // Search backwards from call anchor for async function with preCompactTokenCount
+  const precedingCode = code.slice(0, anchorEnd);
+  // Find all async functions with preCompactTokenCount and cacheSafeParams in their
+  // destructured params, then take the last one (nearest to the call site)
+  const sigCandidates = [];
+  const sigGlobalRe =
+    /async function [\w$]+\(\{[\s\S]*?context: ([\w$]+),[\s\S]*?preCompactTokenCount: ([\w$]+),[\s\S]*?cacheSafeParams: ([\w$]+),/g;
+  let sigMatch;
+  while ((sigMatch = sigGlobalRe.exec(precedingCode)) !== null) {
+    // Only keep candidates whose match ends before the call anchor
+    if (sigMatch.index < anchorEnd) {
+      sigCandidates.push({
+        context: sigMatch[1],
+        preCompactTokenCount: sigMatch[2],
+        cacheSafeParams: sigMatch[3],
+        index: sigMatch.index,
+      });
+    }
+  }
+  if (sigCandidates.length === 0) return null;
+  // Take the last candidate (closest to call site)
+  const sig = sigCandidates[sigCandidates.length - 1];
+  const context = sig.context;
+  const preCompactTokenCount = sig.preCompactTokenCount;
+  const sigCacheSafeParams = sig.cacheSafeParams;
   // Cross-check: the cacheSafeParams local at the call site must be the same
-  // binding as in the signature (both are T). If they differ, the bundle shape
-  // has changed in a way the codemod does not expect -> fail safe.
-  if (sig[3] !== cacheSafeParams) return null;
+  // binding as in the signature. If they differ, the bundle shape has changed
+  // in a way the codemod does not expect -> fail safe.
+  if (sigCacheSafeParams !== cacheSafeParams) return null;
 
-  // (3) createUserMessage -> U6. The definition's destructured param keys
-  //     (content / isMeta / isVisibleInTranscriptOnly / isVirtual /
-  //     isCompactSummary) are stable across releases.
+  // (3) Find createUserMessage. The definition takes destructured params including
+  //     content, isMeta, isCompactSummary. In code-split the param list is much
+  //     longer. We match a function whose first two destructured params are
+  //     content and isMeta, and which also has isCompactSummary somewhere.
   const createUserRe =
-    /function ([\w$]+)\(\{\n\s+content: [\w$]+,\n\s+isMeta: [\w$]+,\n\s+isVisibleInTranscriptOnly: [\w$]+,\n\s+isVirtual: [\w$]+,\n\s+isCompactSummary: [\w$]+,/;
+    /function ([\w$]+)\(\{\n\s+content: [\w$]+,\n\s+isMeta: [\w$]+,[\s\S]*?isCompactSummary: [\w$]+,/;
   const createUser = createUserRe.exec(code);
   if (!createUser) return null;
-  const createUserMessage = createUser[1]; // U6
+  const createUserMessage = createUser[1];
 
   return {
     indent,
@@ -68,8 +119,8 @@ function discoverCompactVars(code) {
     context,
     preCompactTokenCount,
     createUserMessage,
-    index: callSite.index,
-    raw: callSite[0],
+    index: injectionIndex,
+    raw: injectionRaw,
   };
 }
 
