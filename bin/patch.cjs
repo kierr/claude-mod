@@ -900,13 +900,16 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
     "unlock_models",
     "model_picker_search",
   ]);
-  // remove_attribution: Babel parser fails on large code-split chunks (SyntaxError)
+  // remove_attribution: Babel parser fails on code-split chunks (SyntaxError:
+  //   unterminated strings in webcrack output)
   // add_cache_keepalive: 5 injection sites scattered across chunks with
   //   cross-chunk dependencies; needs per-chunk injection strategy
-  // unlock_permanent_cron: addCronTask doesn't exist in 2.1.277; API changed entirely
-  // unlock_permanent_cron: addCronTask doesn't exist in 2.1.277 — the cron API
-  //   changed entirely
-  // unlock_models: Babel codemod — cache function name discovery fails on code-split
+  // unlock_permanent_cron: 2.1.277 replaced addCronTask with a file-based
+  //   scheduled-tasks system that already supports permanent tasks natively
+  //   (the .permanent flag is in the task schema and the age-out check
+  //   respects it: n.recurring && !n.permanent) — no gate to unlock
+  // unlock_models: Babel codemod — cache function name discovery fails on
+  //   code-split (Babel can't parse webcrack deobfuscated ESM chunks)
   // model_picker_search: Babel codemod — no matching structure in code-split
 
   for (const patchId of patches) {
