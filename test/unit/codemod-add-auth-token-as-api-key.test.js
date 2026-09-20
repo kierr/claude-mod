@@ -44,6 +44,31 @@ function buildFixture(variants = {}) {
   }`;
 }
 
+function buildCodeSplitFixture(variants = {}) {
+  const {
+    bareModeFn = "Wy",
+    envPrefix = "a",
+  } = variants;
+
+  return `  function My(e = {}) {
+    if (e.skipRetrievingKeyFromApiKeyHelper) {
+      return { key: null, source: "none" };
+    }
+    let jkn = () => undefined;
+    if (${bareModeFn}()) {
+      return {
+        key: e.skipRetrievingKeyFromApiKeyHelper ? null : jkn(),
+        source: "apiKeyHelper"
+      };
+    }
+    return {
+      key: null,
+      source: "none"
+    };
+  }
+  let n = ${bareModeFn}() ? undefined : ${envPrefix}.ANTHROPIC_API_KEY;`;
+}
+
 describe("codemod-add-auth-token-as-api-key", () => {
   it("injects ANTHROPIC_AUTH_TOKEN check into A$() with mod guard", () => {
     const code = buildFixture();
@@ -148,5 +173,29 @@ describe("codemod-add-auth-token-as-api-key", () => {
     expect(changed).toBe(2);
     expect(result).toContain("(Zq !== tt.source)");
     expect(result).not.toContain('!== "apiKeyHelper" ||');
+  });
+
+  it("applies to code-split chunks using a.ANTHROPIC_API_KEY", () => {
+    const code = buildCodeSplitFixture();
+    const { code: result, changed } = transform(code);
+    expect(changed).toBe(1);
+    expect(result).toContain("__ATAK__");
+    expect(result).toContain('a.ANTHROPIC_AUTH_TOKEN');
+    expect(result).toContain('source: "ANTHROPIC_AUTH_TOKEN"');
+    expect(result).toContain('a.ANTHROPIC_API_KEY');
+  });
+
+  it("is idempotent on code-split chunks", () => {
+    const code = buildCodeSplitFixture();
+    const { code: first } = transform(code);
+    const { code: second, changed } = transform(first);
+    expect(changed).toBe(0);
+    expect(first).toBe(second);
+  });
+
+  it("returns no match on code-split without anchor", () => {
+    const code = `function foo() { source: "none"; } let n = Wy() ? undefined : a.ANTHROPIC_API_KEY;`;
+    const { changed } = transform(code);
+    expect(changed).toBe(0);
   });
 });

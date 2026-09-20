@@ -16,47 +16,80 @@ function transform(code) {
     return { code, changed: 0 };
   }
 
+  // Detect code-split: uses `a.ANTHROPIC_API_KEY` instead of `process.env.ANTHROPIC_API_KEY`
+  const isCodeSplit = code.includes("a.ANTHROPIC_API_KEY") && !code.includes("process.env.ANTHROPIC_API_KEY");
+  const envPrefix = isCodeSplit ? "a" : "process.env";
+
   // Match the transition from bare-mode block to normal key resolution.
   // The bare-mode block ends with `source: "none"` + closing braces,
-  // followed by `let _ = <fn>() ? undefined : process.env.ANTHROPIC_API_KEY;`
+  // followed by `let _ = <fn>() ? undefined : <envPrefix>.ANTHROPIC_API_KEY;`
   //
-  // We match:
-  //   source: "none"\n      };\n    }\n    let <var> = <fn>() ? undefined : process.env.ANTHROPIC_API_KEY;
-  // And inject the ANTHROPIC_AUTH_TOKEN check between the } and the let.
+  // Monolithic pattern:
+  //   source: "none"\n      };\n    }\n    let VAR = FN() ? undefined : process.env.ANTHROPIC_API_KEY;
+  // Code-split pattern:
+  //   source: "none"\n    };\n  }\n  let VAR = FN() ? undefined : a.ANTHROPIC_API_KEY;
+  // (Code-split has one less level of nesting, so fewer closing braces.)
 
-  const pattern = new RegExp(
-    '(source: "none"\\n' +
-    '\\s+};\\n' +
-    '\\s+}\\n' +
-    ')(\\s+let [\\w$]+ = [\\w$]+\\(\\) \\? undefined : process\\.env\\.ANTHROPIC_API_KEY;)',
-  );
+  let matched = false;
+  let working = code;
 
-  const match = code.match(pattern);
-  if (!match) {
-    return { code, changed: 0 };
+  // Try code-split pattern first (more specific env prefix)
+  if (isCodeSplit) {
+    const csPattern = new RegExp(
+      '(source: "none"\\n' +
+      '\\s+};\\n' +
+      '\\s+}\\n' +
+      ')(\\s+let [\\w$]+ = [\\w$]+\\(\\) \\? undefined : a\\.ANTHROPIC_API_KEY;)',
+    );
+    const csMatch = working.match(csPattern);
+    if (csMatch) {
+      const matchIndex = working.indexOf(csMatch[0]);
+      const precedingContext = working.substring(Math.max(0, matchIndex - 1000), matchIndex);
+      if (precedingContext.includes(STABLE_ANCHOR)) {
+        const injection =
+          csMatch[1] +
+          "    if (typeof __isModEnabled__===\"function\"&&__isModEnabled__(\"" + MOD_ID + "\")&&" + envPrefix + ".ANTHROPIC_AUTH_TOKEN) {\n" +
+          "      return {\n" +
+          "        key: " + envPrefix + ".ANTHROPIC_AUTH_TOKEN,\n" +
+          "        source: \"ANTHROPIC_AUTH_TOKEN\"\n" +
+          "      }; /* __ATAK__ */\n" +
+          "    }\n" +
+          csMatch[2];
+        working = working.replace(csPattern, () => injection);
+        matched = true;
+      }
+    }
   }
 
-  // Verify this is inside the right function by checking the anchor is nearby
-  const matchIndex = code.indexOf(match[0]);
-  const precedingContext = code.substring(Math.max(0, matchIndex - 500), matchIndex);
-  if (!precedingContext.includes(STABLE_ANCHOR)) {
-    return { code, changed: 0 };
+  // Try monolithic pattern
+  if (!matched) {
+    const monoPattern = new RegExp(
+      '(source: "none"\\n' +
+      '\\s+};\\n' +
+      '\\s+}\\n' +
+      ')(\\s+let [\\w$]+ = [\\w$]+\\(\\) \\? undefined : process\\.env\\.ANTHROPIC_API_KEY;)',
+    );
+    const monoMatch = working.match(monoPattern);
+    if (monoMatch) {
+      const matchIndex = working.indexOf(monoMatch[0]);
+      const precedingContext = working.substring(Math.max(0, matchIndex - 1000), matchIndex);
+      if (precedingContext.includes(STABLE_ANCHOR)) {
+        const injection =
+          monoMatch[1] +
+          "    if (typeof __isModEnabled__===\"function\"&&__isModEnabled__(\"" + MOD_ID + "\")&&" + envPrefix + ".ANTHROPIC_AUTH_TOKEN) {\n" +
+          "      return {\n" +
+          "        key: " + envPrefix + ".ANTHROPIC_AUTH_TOKEN,\n" +
+          "        source: \"ANTHROPIC_AUTH_TOKEN\"\n" +
+          "      }; /* __ATAK__ */\n" +
+          "    }\n" +
+          monoMatch[2];
+        working = working.replace(monoPattern, () => injection);
+        matched = true;
+      }
+    }
   }
 
-  const injection =
-    match[1] +
-    "    if (typeof __isModEnabled__===\"function\"&&__isModEnabled__(\"" + MOD_ID + "\")&&process.env.ANTHROPIC_AUTH_TOKEN) {\n" +
-    "      return {\n" +
-    "        key: process.env.ANTHROPIC_AUTH_TOKEN,\n" +
-    "        source: \"ANTHROPIC_AUTH_TOKEN\"\n" +
-    "      }; /* __ATAK__ */\n" +
-    "    }\n" +
-    match[2];
-
-  // Use callback to avoid $-pattern interpretation in captured text (e.g.
-  // minified names like $1 would be treated as backreferences in a string arg).
-  let working = code.replace(pattern, () => injection);
-  let changed = working !== code ? 1 : 0;
+  let changed = matched ? 1 : 0;
 
   // Rider: suppress the both-auth-methods false-positive warning (__BAM__).
   // The injection above makes the API-key resolver return source
