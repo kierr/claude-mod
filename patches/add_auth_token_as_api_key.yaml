@@ -5,10 +5,11 @@ description: "Uses ANTHROPIC_AUTH_TOKEN as the API-key source and suppresses the
 file_id: "cli"
 order: 15
 status_tests:
-  # applied checks __ATAK__ only; the __BAM__ warning-suppression rider is best-effort
-  # so a future rewrite of the both-auth-methods warning can't fail verification and
-  # disable this auth mod along with it. If the rider drifts, the warning returns.
-  applied: '__ATAK__'
+  # applied accepts either __ATAK__ (main injection) or __BAM__ (warning-suppression
+  # rider). Both indicate the codemod has been applied to a chunk. The rider may
+  # apply in a different chunk than the main injection (chunk-5eyc0np8 vs
+  # chunk-afz31dc9 in 2.1.277 code-split).
+  applied: '__ATAK__|__BAM__'
   applicable: 'skipRetrievingKeyFromApiKeyHelper'
 codemod:
   type: "node_script"
