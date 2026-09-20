@@ -892,10 +892,33 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
   }
 
   // Code-split patches already handled by pipeline-level fixBunCjsWrapper()
-  const CODESPLIT_SKIP_PATCHES = new Set(["mods_runtime", "remove_attribution"]);
+  const CODESPLIT_SKIP_PATCHES = new Set([
+    "mods_runtime",
+    "remove_attribution",
+    "unlock_agent_models",
+    "add_multi_custom_models",
+    "add_cache_keepalive",
+    "add_compact_memory_capture",
+    "display_model_name",
+    "unlock_permanent_cron",
+    "unlock_models",
+    "model_picker_search",
+  ]);
   // remove_attribution: Babel parser fails on large code-split chunks (SyntaxError)
-  // RATIONALE: the 6.4MB chunk-*.js has syntax that Babel can't parse. Would need
-  // regex conversion like the Babel-to-regex project to work on code-split.
+  // unlock_agent_models: code-split has no .enum(["sonnet"..."haiku"]) for agent model
+  //   validation — uses provider lookup (KLr) and type matching (R2) instead
+  // add_multi_custom_models: code-split doesn't use the custom model insertion
+  //   pattern (no .optional().default("sonnet") on a model field)
+  // add_cache_keepalive: 5 injection sites scattered across chunks with
+  //   cross-chunk dependencies; needs per-chunk injection strategy
+  // add_compact_memory_capture: code-split doesn't have the specific function
+  //   signature pattern (cacheSafeParams, preCompactTokenCount) used by the codemod
+  // display_model_name: code-split doesn't have the teammate list component
+  //   with destructured { teammate, isLast, isSelected, ... } props
+  // unlock_permanent_cron: addCronTask doesn't exist in 2.1.277 — the cron API
+  //   changed entirely
+  // unlock_models: Babel codemod — cache function name discovery fails on code-split
+  // model_picker_search: Babel codemod — no matching structure in code-split
 
   for (const patchId of patches) {
     if (CODESPLIT_SKIP_PATCHES.has(patchId)) {
