@@ -43,6 +43,20 @@ function buildPatchBInput(names = {}) {
   }`;
 }
 
+function buildPatchACodeSplitInput(names = {}) {
+  const fn = names.fn || "r";
+  const settingsFn = names.settingsFn || "kC";
+  return `function ${fn}() {
+  if (a.CLAUDE_CODE_DISABLE_AGENT_VIEW) {
+    return "is disabled by CLAUDE_CODE_DISABLE_AGENT_VIEW";
+  }
+  if (${settingsFn}()?.settings.disableAgentView === true) {
+    return "is disabled by the 'disableAgentView' setting";
+  }
+  return null;
+}`;
+}
+
 describe("codemod-unlock-agent-view", () => {
   describe("Patch A: disable-check gate", () => {
     it("should replace disable-check function body with return false", () => {
@@ -201,6 +215,34 @@ describe("codemod-unlock-agent-view", () => {
       expect(code).toContain("return false; /* __AVFE__ */");
       // DF() is untouched — it returns !MpH() which is now !false = true
       expect(code).toContain("return !MpH()");
+    });
+  });
+
+  describe("Patch A code-split: a.CLAUDE_CODE_DISABLE_AGENT_VIEW (2.1.277+)", () => {
+    it("should wrap code-split disable-check function with mod guard", () => {
+      const input = buildPatchACodeSplitInput();
+      const { code, changed } = transform(input);
+
+      expect(changed).toBe(1);
+      expect(code).toContain("return null; /* __AVFE__ */");
+      expect(code).toContain("__isModEnabled__(\"unlock_agent_view\")");
+    });
+
+    it("should work with different minified names", () => {
+      const input = buildPatchACodeSplitInput({ fn: "Z9x", settingsFn: "eN" });
+      const { code, changed } = transform(input);
+
+      expect(changed).toBe(1);
+      expect(code).toContain("return null; /* __AVFE__ */");
+    });
+
+    it("should be idempotent", () => {
+      const input = buildPatchACodeSplitInput();
+      const first = transform(input);
+      const second = transform(first.code);
+
+      expect(second.changed).toBe(0);
+      expect(second.code).toBe(first.code);
     });
   });
 });

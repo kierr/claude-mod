@@ -47,6 +47,29 @@ function wrapFunctionBody(fullMatch, indent, fnName, { returnValue, marker }) {
  * Stable anchors: CLAUDE_CODE_DISABLE_AGENT_VIEW, disableAgentView
  */
 function patchA(code) {
+  // Code-split (2.1.277+): direct property access instead of FN(process.env.X)
+  // if (a.CLAUDE_CODE_DISABLE_AGENT_VIEW) {
+  const PATTERN_CODESPLIT = new RegExp(
+    "([ \\t]*)function\\s+([\\w$]+)\\(\\)\\s*\\{\\s*\\n" +
+    "\\s*if\\s*\\(\\s*a\\.CLAUDE_CODE_DISABLE_AGENT_VIEW\\s*\\)\\s*\\{\\s*\\n" +
+    '\\s*return\\s+"is disabled by CLAUDE_CODE_DISABLE_AGENT_VIEW"\\s*;\\s*\\n' +
+    "\\s*\\}\\s*\\n" +
+    "\\s*if\\s*\\(\\s*[\\w$]+\\(\\)\\s*\\?\\.settings\\.disableAgentView\\s*===\\s*true\\s*\\)\\s*\\{\\s*\\n" +
+    '\\s*return\\s+"is disabled by the \'disableAgentView\' setting"\\s*;\\s*\\n' +
+    "\\s*\\}\\s*\\n" +
+    "\\s*return\\s+null\\s*;\\s*\\n" +
+    "\\s*\\}"
+  );
+
+  let match = PATTERN_CODESPLIT.exec(code);
+  if (match) {
+    const m0 = match;
+    const replaced = code.replace(PATTERN_CODESPLIT, () =>
+      wrapFunctionBody(m0[0], m0[1], m0[2], { returnValue: "null", marker: "/* __AVFE__ */" })
+    );
+    return { code: replaced, changed: 1 };
+  }
+
   // Variant 2 (>= 2.1.144): multi-line if/return with reason strings.
   // Built with new RegExp(string) to handle the single quote in the setting string.
   const PATTERN_V2 = new RegExp(
@@ -54,17 +77,18 @@ function patchA(code) {
     "\\s*if\\s*\\(\\s*[\\w$]+\\(\\s*process\\.env\\.CLAUDE_CODE_DISABLE_AGENT_VIEW\\s*\\)\\s*\\)\\s*\\{\\s*\\n" +
     '\\s*return\\s+"is disabled by CLAUDE_CODE_DISABLE_AGENT_VIEW"\\s*;\\s*\\n' +
     "\\s*\\}\\s*\\n" +
-    "\\s*if\\s*\\(\\s*[\\w$]+\\(\\s*\\)\\s*\\?\\.settings\\.disableAgentView\\s*===\\s*true\\s*\\)\\s*\\{\\s*\\n" +
-    "\\s*return\\s+\"is disabled by the 'disableAgentView' setting\"\\s*;\\s*\\n" +
+    "\\s*if\\s*\\(\\s*[\\w$]+\\(\\)\\s*\\?\\.settings\\.disableAgentView\\s*===\\s*true\\s*\\)\\s*\\{\\s*\\n" +
+    '\\s*return\\s+"is disabled by the \'disableAgentView\' setting"\\s*;\\s*\\n' +
     "\\s*\\}\\s*\\n" +
     "\\s*return\\s+null\\s*;\\s*\\n" +
     "\\s*\\}"
   );
 
-  let match = PATTERN_V2.exec(code);
+  match = PATTERN_V2.exec(code);
   if (match) {
+    const m1 = match;
     const replaced = code.replace(PATTERN_V2, () =>
-      wrapFunctionBody(match[0], match[1], match[2], { returnValue: "null", marker: "/* __AVFE__ */" })
+      wrapFunctionBody(m1[0], m1[1], m1[2], { returnValue: "null", marker: "/* __AVFE__ */" })
     );
     return { code: replaced, changed: 1 };
   }
@@ -75,8 +99,9 @@ function patchA(code) {
 
   match = PATTERN_V1.exec(code);
   if (match) {
+    const m2 = match;
     const replaced = code.replace(PATTERN_V1, () =>
-      wrapFunctionBody(match[0], match[1], match[2], { returnValue: "false", marker: "/* __AVFE__ */" })
+      wrapFunctionBody(m2[0], m2[1], m2[2], { returnValue: "false", marker: "/* __AVFE__ */" })
     );
     return { code: replaced, changed: 1 };
   }
