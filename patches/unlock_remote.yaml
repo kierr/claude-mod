@@ -6,7 +6,7 @@ file_id: "cli"
 
 
 status_tests:
-  applied: '__isModEnabled__\(\s*["\x27]unlock_remote["\x27]\s*\)\s*\?\s*true\s*:\s*[\w$]+\("tengu_surreal_dali",\s*false\)\s*&&\s*[\w$]+\("allow_remote_sessions"\)'
+  applied: '__isModEnabled__\(\s*["\x27]unlock_remote["\x27]\s*\).{0,200}allow_remote_sessions'
   applicable: 'allow_remote_sessions'
 
 codemod:

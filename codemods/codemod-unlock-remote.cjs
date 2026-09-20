@@ -119,6 +119,30 @@ function transform(code) {
     }
   );
 
+  // Pass 3b: Code-split compound — fn() && fn("allow_remote_sessions")
+  // E.g., mt() && zt("allow_remote_sessions") or gN() && zt("allow_remote_sessions")
+  // In code-split, the compound guard appears as a standalone return or let
+  // (not inside a get isEnabled() wrapper like the monolithic pattern).
+  // Only match when preceded by `return` or `let ... =` to avoid wrapping
+  // arbitrary occurrences of zero-arg-fn ANDed with the policy check.
+  // Idempotency: isInsideModTernary catches already-wrapped expressions.
+  code = code.replace(
+    /((?:return|let\s+[\w$]+\s*=)\s*)[\w$]+\(\)\s*&&\s*[\w$]+\("allow_remote_sessions"\)/g,
+    (m, prefix, offset) => {
+      if (isInsideModTernary(code, offset)) return m;
+      // Extract just the expression part (without the prefix)
+      const expr = m.substring(prefix.length);
+      changed += 1;
+      return prefix + wrapTrue(expr);
+    }
+  );
+
+  // Pass 3c: Code-split negated policy — !fn("allow_remote_sessions")
+  // Same as Pass 3 but for code-split where the function name differs from monolithic
+  // This is already covered by Pass 3's regex, but code-split may also use:
+  //   !fn("allow_remote_sessions") as a standalone check (no quick_web_setup concern)
+  // No additional pass needed — Pass 3 already handles this.
+
   return { code, changed };
 }
 
