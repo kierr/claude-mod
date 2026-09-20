@@ -28,6 +28,16 @@ function toolBatch() { var d = 400000; var e = 200000; var f = 50; return e; }
 function memChunk() { var g = 250000; var h = 200000; var i = 3; return h; }
 `;
 
+const CODESPLIT_CLUSTER = `
+var fxe = 200000;
+var Lj = 200000;
+var pF = 32000;
+var Cae = 128000;
+function QH() {
+  return a.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+}
+`;
+
 describe("codemod-set-context-limit", () => {
   it("rewrites each cluster to __getModConfig__ ?? 200000", { timeout: TIMEOUT }, () => {
     const out = runCodemod(ALL_THREE);
@@ -73,5 +83,23 @@ var i = 3;
 
   it("returns no changes for unrelated code", { timeout: TIMEOUT }, () => {
     expect(() => runCodemod("const x = 42;\nconsole.log(x);\n")).not.toThrow();
+  });
+
+  it("patches code-split cluster (two 200000s + 32000 + 128000)", { timeout: TIMEOUT }, () => {
+    const out = runCodemod(CODESPLIT_CLUSTER);
+    // First 200000 (fxe) = context_limit, second (Lj) = tool_batch_limit
+    expect(out).toContain('var fxe = __getModConfig__("set_context_limit", "context_limit") ?? 200000;');
+    expect(out).toContain('var Lj = __getModConfig__("set_context_limit", "tool_batch_limit") ?? 200000;');
+    // pF = 32000 gets patched to memory_chunk_limit
+    expect(out).toContain('var pF = __getModConfig__("set_context_limit", "memory_chunk_limit") ?? 32000;');
+    expect(out).toContain('var Cae = 128000;'); // unchanged
+  });
+
+  it("is idempotent on code-split", { timeout: TIMEOUT }, () => {
+    const first = runCodemod(CODESPLIT_CLUSTER);
+    const second = runCodemod(first);
+    const cfgCount = (second.match(/__getModConfig__\("set_context_limit"/g) || []).length;
+    expect(cfgCount).toBe(3);
+    expect(first).toBe(second);
   });
 });

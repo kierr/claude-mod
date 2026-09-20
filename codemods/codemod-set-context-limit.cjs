@@ -1,24 +1,13 @@
 #!/usr/bin/env node
-// Match each numeric limit by its surrounding operation; identical constants serve independent purposes.
+// Set context window limits: override the 200000 default with mod config values,
+// and replace bare > 200000 comparisons in the context-window guard function.
+"use strict";
 
 const fs = require("fs");
 const path = require("path");
 
 const MOD_ID = "set_context_limit";
 
-/**
- * Find three clusters of `var X = 200000;` by their neighboring var declarations
- * (within the same brace-delimited block), and replace each with
- * __getModConfig__("set_context_limit", key) ?? 200000.
- *
- * Also finds a hardcoded > 200000 comparison in a function containing .findLast
- * and "assistant", replacing 200000 with the context-window variable reference.
- *
- * Clusters (identified by neighboring numeric constants in same block scope):
- * - context_limit: 200000 with neighbors [20000, 32000]
- * - tool_batch_limit: 200000 with neighbors [400000, 50]
- * - memory_chunk_limit: 200000 with neighbors [250000, 3]
- */
 function transform(code) {
   // Idempotency: if all three config calls exist, skip
   const cfgPattern = `__getModConfig__("${MOD_ID}"`;
@@ -30,17 +19,28 @@ function transform(code) {
   const cfgCall = (key) => `__getModConfig__("${MOD_ID}", "${key}") ?? 200000`;
   let count = 0;
 
+  // Detect code-split by the CLAUDE_CODE_DISABLE_1M_CONTEXT property-access pattern
+  const isCodeSplit = code.includes("a.CLAUDE_CODE_DISABLE_1M_CONTEXT") ||
+    (code.includes("a.ANTHROPIC_API_KEY") && !code.includes("process.env.ANTHROPIC_API_KEY"));
+
   // Find each `var X = 200000;` and scope to its containing brace block
   const var200kPattern = /var\s+([\w$]+)\s*=\s*200000\s*;/g;
-
   const candidates = [];
   let m;
   while ((m = var200kPattern.exec(code)) !== null) {
     candidates.push({ name: m[1], index: m.index, matchStr: m[0] });
   }
 
-  // Process in reverse order to maintain earlier offsets
-  for (let ci = candidates.length - 1; ci >= 0; ci--) {
+  // Phase 1: Classify all candidates BEFORE any replacements
+  // (replacements change the neighbor window, breaking classification of
+  // co-located candidates like fxe/Lj in the same 500-char block).
+  const classifications = new Map(); // candidate name → cfgKey
+
+  // For code-split disambiguation: track which 200000 is first vs second
+  // in a block that has [200000, 32000, 128000] as neighbors
+  const codeSplitBlockOrder = new Map(); // blockKey → array of candidate indices (in source order)
+
+  for (let ci = 0; ci < candidates.length; ci++) {
     const cand = candidates[ci];
     const pos = cand.index;
 
@@ -56,12 +56,11 @@ function transform(code) {
     }
 
     let block;
-    let blockStart, blockEnd;
     if (braceStart === -1) {
-      // Top-level scope: no enclosing braces — use the whole file
-      block = code;
-      blockStart = 0;
-      blockEnd = code.length;
+      // Top-level scope: use a window
+      const blockStart = Math.max(0, pos - 250);
+      const blockEnd = Math.min(code.length, pos + 250);
+      block = code.substring(blockStart, blockEnd);
     } else {
       let braceEnd = -1;
       depth = 1;
@@ -71,8 +70,6 @@ function transform(code) {
       }
       if (braceEnd === -1) continue;
       block = code.substring(braceStart, braceEnd + 1);
-      blockStart = braceStart;
-      blockEnd = braceEnd + 1;
     }
 
     // Find neighboring numeric var declarations within this block
@@ -87,18 +84,71 @@ function transform(code) {
 
     // Classify by cluster
     let cfgKey = null;
-    if ([20000, 32000].every(v => neighbors.includes(v))) {
-      cfgKey = "context_limit";
-    } else if ([400000, 50].every(v => neighbors.includes(v))) {
-      cfgKey = "tool_batch_limit";
-    } else if ([250000, 3].every(v => neighbors.includes(v))) {
-      cfgKey = "memory_chunk_limit";
+    if (isCodeSplit) {
+      const neighborSet = new Set(neighbors);
+      if (neighborSet.has(32000) && neighborSet.has(128000) && neighborSet.has(200000)) {
+        // Two 200000s in same block — disambiguate by source order
+        const blockKey = braceStart;
+        if (!codeSplitBlockOrder.has(blockKey)) {
+          codeSplitBlockOrder.set(blockKey, []);
+        }
+        codeSplitBlockOrder.get(blockKey).push(ci);
+      } else if (neighborSet.has(32000) && neighborSet.has(128000)) {
+        cfgKey = "context_limit"; // standalone 200000 with 32000/128000 neighbors
+      }
+    } else {
+      // Monolithic
+      if ([20000, 32000].every(v => neighbors.includes(v))) {
+        cfgKey = "context_limit";
+      } else if ([400000, 50].every(v => neighbors.includes(v))) {
+        cfgKey = "tool_batch_limit";
+      } else if ([250000, 3].every(v => neighbors.includes(v))) {
+        cfgKey = "memory_chunk_limit";
+      }
     }
 
     if (cfgKey) {
-      const newDecl = `var ${cand.name} = ${cfgCall(cfgKey)};`;
-      code = code.substring(0, cand.index) + newDecl + code.substring(cand.index + cand.matchStr.length);
-      count++;
+      classifications.set(ci, cfgKey);
+    }
+  }
+
+  // Resolve code-split disambiguation: first 200000 in source order = context_limit,
+  // second = tool_batch_limit
+  for (const [, indices] of codeSplitBlockOrder) {
+    // indices are already in source order (forward iteration)
+    if (indices.length >= 1) {
+      classifications.set(indices[0], "context_limit");
+    }
+    if (indices.length >= 2) {
+      classifications.set(indices[1], "tool_batch_limit");
+    }
+  }
+
+  // Phase 2: Apply replacements in reverse order (to maintain string offsets)
+  for (let ci = candidates.length - 1; ci >= 0; ci--) {
+    const cand = candidates[ci];
+    const cfgKey = classifications.get(ci);
+    if (!cfgKey) continue;
+
+    const newDecl = `var ${cand.name} = ${cfgCall(cfgKey)};`;
+    code = code.substring(0, cand.index) + newDecl + code.substring(cand.index + cand.matchStr.length);
+    count++;
+  }
+
+  // Code-split: patch memory_chunk_limit (var X = 32000 near patched context vars and 128000)
+  if (isCodeSplit && count > 0) {
+    const memChunkPattern = /var\s+([\w$]+)\s*=\s*32000\s*;/g;
+    let mcMatch;
+    while ((mcMatch = memChunkPattern.exec(code)) !== null) {
+      const mcPos = mcMatch.index;
+      // Check if this 32000 is near a 128000 and a patched context var
+      const nearby = code.substring(Math.max(0, mcPos - 200), mcPos + 200);
+      if (nearby.includes("128000") && nearby.includes("context_limit")) {
+        const newDecl = `var ${mcMatch[1]} = __getModConfig__("${MOD_ID}", "memory_chunk_limit") ?? 32000;`;
+        code = code.substring(0, mcMatch.index) + newDecl + code.substring(mcMatch.index + mcMatch[0].length);
+        count++;
+        break; // Only patch the first matching one
+      }
     }
   }
 

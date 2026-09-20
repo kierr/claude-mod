@@ -6,8 +6,9 @@ file_id: "cli"
 status_tests:
   # applied: the __getModConfig__ override is present
   applied: '__getModConfig__\(\s*["\x27]set_context_limit["\x27]'
-  # applicable: original context window cluster (200000, 20000, 32000) exists unpatched
-  applicable: 'var [\w$]+ = 200000;\s*\r?\n\s*var [\w$]+ = 20000;\s*\r?\n\s*var [\w$]+ = 32000;'
+  # Monolithic: 200000, 20000, 32000 cluster
+  # Code-split: 200000, 200000, 32000, 128000 cluster (two 200000s co-located)
+  applicable: 'var [\w$]+ = 200000;\s*\r?\n\s*var [\w$]+ = (20000|200000);'
 codemod:
   type: "node_script"
   engine: "regex"
