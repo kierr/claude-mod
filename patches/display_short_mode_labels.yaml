@@ -7,8 +7,13 @@ order: 25
 
 
 status_tests:
-  applied: '__isModEnabled__\("display_short_mode_labels"\).*\?.*".*Plan"'
-  applicable: 'Plan Mode'
+  # Monolithic: Plan Mode → Plan (most visible change). Code-split: may already be Plan,
+  # so also accept Bypass Permissions → Bypass or Accept edits → Edits.
+  applied: '__isModEnabled__\("display_short_mode_labels"\).*\?.*"(?:Plan|Bypass|Edits)"'
+  # Monolithic: 'Plan Mode' appears in the same file as the title strings.
+  # Code-split: 'Plan Mode' is in a different chunk; use 'Accept edits' which
+  # co-locates with the other title strings in the UI chunk.
+  applicable: 'Accept edits'
 codemod:
   type: "node_script"
   engine: "regex"
