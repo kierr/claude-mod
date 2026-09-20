@@ -7,15 +7,15 @@ const MOD_ID = "display_model_slug";
 
 const MODEL_PREFIXES = {
   sonnet: "Sonnet 4.6 · ",
-  sonnet_xB7: "Sonnet 4.6 \\xB7 ",
+  sonnet_xB7: "Sonnet 4.6 \xB7 ",
   sonnet_us: "Sonnet 4.6 _ ",
   opus: "Opus 4.6 · ",
-  opus_xB7: "Opus 4.6 \\xB7 ",
+  opus_xB7: "Opus 4.6 \xB7 ",
   opus_us: "Opus 4.6 _ ",
   opus47: "Opus 4.7 · ",
   opus48: "Opus 4.8 · ",
   haiku: "Haiku 4.5 · ",
-  haiku_xB7: "Haiku 4.5 \\xB7 ",
+  haiku_xB7: "Haiku 4.5 \xB7 ",
   haiku_us: "Haiku 4.5 _ ",
 };
 
@@ -89,18 +89,23 @@ function findSlugResolver(code) {
   }
 
   // Strategy 2: Switch-in-function slug resolver
-  const switchPattern = /function\s+([\w$]+)\s*\(([\w$]+)\)\s*\{[^}]*switch\s*\(\s*[\w$]+\s*\)\s*\{[^}]*case\s+"opus"[\s\S]*?return\s+"claude-[^"]*"[\s\S]*?case\s+"sonnet"[\s\S]*?return\s+"claude-[^"]*"[\s\S]*?case\s+"haiku"[\s\S]*?return\s+"claude-[^"]*"/g;
+  // Monolithic: returns string literals like return "claude-opus-4-6"
+  // Code-split: returns variables like return zB (which hold the slug strings)
+  const switchPattern = /function\s+([\w$]+)\s*\(([\w$]+)\)\s*\{[^}]*switch\s*\(\s*[\w$]+\s*\)\s*\{[^}]*case\s+"opus"[\s\S]*?return\s+(?:"[^"]*"|[\w$]+)[\s\S]*?case\s+"sonnet"[\s\S]*?return\s+(?:"[^"]*"|[\w$]+)[\s\S]*?case\s+"haiku"[\s\S]*?return\s+(?:"[^"]*"|[\w$]+)/g;
   let switchCandidates = [];
   while ((m = switchPattern.exec(code)) !== null) {
     const name = m[1];
     const funcBody = m[0];
-    // Verify the return values are slugs, not descriptions
-    const caseReturns = [...funcBody.matchAll(/case\s+"(opus|sonnet|haiku)"[\s\S]*?return\s+"([^"]*)"/g)];
-    let allSlugs = true;
+    // Check that return values look like slugs (string literals starting with "claude-"
+    // or variable references)
+    const caseReturns = [...funcBody.matchAll(/case\s+"(opus|sonnet|haiku)"[\s\S]*?return\s+(["'][^"']*"?|[\w$]+)/g)];
+    let allValid = true;
     for (const cr of caseReturns) {
-      if (!/^claude-/.test(cr[2])) { allSlugs = false; break; }
+      const val = cr[2];
+      // Accept either string literals starting with "claude-" or variable references
+      if (val.startsWith('"') && !/^"claude-/.test(val)) { allValid = false; break; }
     }
-    if (allSlugs) {
+    if (allValid) {
       const declIdx = m.index;
       const before = code.substring(Math.max(0, declIdx - 500), declIdx);
       let funcDepth = 0;
@@ -177,8 +182,10 @@ function transform(code) {
     const escapedPrefix = escapeRegex(prefix);
 
     // Pattern: description: `PREFIX${...}` (template literal)
+    // Pattern: description: `PREFIX...` (template literal)
+    // Negative lookahead: don't match already-patched descriptions
     const descTemplatePattern = new RegExp(
-      "description:\\s*`" + escapedPrefix + "([\\s\\S]*?)`",
+      "description:\\s*`" + escapedPrefix + "((?:(?!__isModEnabled__).)*?)`",
       "g"
     );
     code = code.replace(descTemplatePattern, (match, rest) => {
@@ -188,8 +195,9 @@ function transform(code) {
     });
 
     // Pattern: description: "PREFIX..." (string literal)
+    // Negative lookahead: don't match already-patched descriptions
     const descStringPattern = new RegExp(
-      "description:\\s*\"" + escapedPrefix + "([^\"]*)\"",
+      "description:\\s*\"" + escapedPrefix + "((?:(?!__isModEnabled__).)*?)\"",
       "g"
     );
     code = code.replace(descStringPattern, (match, rest) => {

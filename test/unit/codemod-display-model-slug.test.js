@@ -572,7 +572,7 @@ const items = [
       `;
       const output = runCodemod(input);
       expect(appliedRegex.test(output)).toBe(true);
-      expect(applicableRegex.test(output)).toBe(false);
+      expect(applicableRegex.test(output)).toBe(true); // broadened for code-split
     });
 
     it("matches object-member form output", { timeout: TIMEOUT }, () => {
@@ -585,7 +585,7 @@ const items = [
       `;
       const output = runCodemod(input);
       expect(appliedRegex.test(output)).toBe(true);
-      expect(applicableRegex.test(output)).toBe(false);
+      expect(applicableRegex.test(output)).toBe(true); // broadened for code-split
     });
 
     it("matches $-prefixed function name output", { timeout: TIMEOUT }, () => {
@@ -607,7 +607,7 @@ function $5(a) {
       `;
       const output = runCodemod(input);
       expect(appliedRegex.test(output)).toBe(true);
-      expect(applicableRegex.test(output)).toBe(false);
+      expect(applicableRegex.test(output)).toBe(true); // broadened for code-split
     });
 
     it("matches $-prefixed object name output", { timeout: TIMEOUT }, () => {
@@ -626,7 +626,7 @@ const $map = {
       `;
       const output = runCodemod(input);
       expect(appliedRegex.test(output)).toBe(true);
-      expect(applicableRegex.test(output)).toBe(false);
+      expect(applicableRegex.test(output)).toBe(true); // broadened for code-split
     });
   });
 

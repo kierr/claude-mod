@@ -7,7 +7,9 @@ file_id: "cli"
 status_tests:
   # applied: mod guard for this patch is present in the output
   applied: '__isModEnabled__\(\s*["\x27]display_model_slug["\x27]\s*\)'
-  applicable: 'Sonnet 4\.6 (?:·|\\xB7) (?:Best for everyday tasks|\$\{)'
+  # Monolithic: Sonnet 4.6 · Best for everyday tasks (or template literal)
+  # Code-split (2.1.277+): Sonnet 4.6 · Previous Sonnet version
+  applicable: 'Sonnet 4\.6 (?:·|\xB7|_) '
 
 codemod:
   type: "node_script"
