@@ -892,7 +892,10 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
   }
 
   // Code-split patches already handled by pipeline-level fixBunCjsWrapper()
-  const CODESPLIT_SKIP_PATCHES = new Set(["mods_runtime"]);
+  const CODESPLIT_SKIP_PATCHES = new Set(["mods_runtime", "remove_attribution"]);
+  // remove_attribution: Babel parser fails on large code-split chunks (SyntaxError)
+  // RATIONALE: the 6.4MB chunk-*.js has syntax that Babel can't parse. Would need
+  // regex conversion like the Babel-to-regex project to work on code-split.
 
   for (const patchId of patches) {
     if (CODESPLIT_SKIP_PATCHES.has(patchId)) {
