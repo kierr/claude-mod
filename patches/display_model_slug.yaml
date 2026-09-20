@@ -9,7 +9,8 @@ status_tests:
   applied: '__isModEnabled__\(\s*["\x27]display_model_slug["\x27]\s*\)'
   # Monolithic: Sonnet 4.6 · Best for everyday tasks (or template literal)
   # Code-split (2.1.277+): Sonnet 4.6 · Previous Sonnet version
-  applicable: 'Sonnet 4\.6 (?:·|\xB7|_) '
+  # Match Sonnet 4.6 followed by: literal middle-dot (·), JS escape (\xB7), or underscore
+  applicable: 'Sonnet 4\.6 (?:·|\\xB7|_) '
 
 codemod:
   type: "node_script"
