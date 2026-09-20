@@ -898,7 +898,6 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
     "unlock_agent_models",
     "add_multi_custom_models",
     "add_cache_keepalive",
-    "display_model_name",
     "unlock_permanent_cron",
     "unlock_models",
     "model_picker_search",
@@ -910,8 +909,7 @@ function applyPatches(deobfuscatedPath, patches, verbose = false, timeout = 0, c
   //   pattern (no .optional().default("sonnet") on a model field)
   // add_cache_keepalive: 5 injection sites scattered across chunks with
   //   cross-chunk dependencies; needs per-chunk injection strategy
-  // display_model_name: code-split doesn't have the teammate list component
-  //   with destructured { teammate, isLast, isSelected, ... } props
+  // unlock_permanent_cron: addCronTask doesn't exist in 2.1.277; API changed entirely
   // unlock_permanent_cron: addCronTask doesn't exist in 2.1.277 — the cron API
   //   changed entirely
   // unlock_models: Babel codemod — cache function name discovery fails on code-split
