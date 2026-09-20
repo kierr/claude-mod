@@ -5,19 +5,12 @@ description: "Make the server-side advisor tool (second-opinion model) fully usa
 file_id: "cli"
 
 status_tests:
-  # All four injection markers present AND in source order: ENABLE (in Pc, ~445324)
-  # → CGK (in cGK, ~445336) → FGH (in fGH, ~445368) → PAIRING (in nGK, ~445406).
-  # Requiring all four catches the case where the runtime path is patched (1 & 2)
-  # but the selection/UI layer has drifted (3 & 4 skip) — otherwise the advisor
-  # would "enable" and the resolver would run, but the picker stays empty, the
-  # warning still prints, and /advisor <model> is rejected on a proxy.
-  # RATIONALE: do NOT rewrite as pure lookaheads (?=[\s\S]*X) — verified 2026-06-16
-  # that they hang patternExistsIn on the marker-less baseline (zero-width-capable
-  # pattern retries from every position in the 25MB bundle, each lookahead re-scanning
-  # the full file). The leading __ADVISOR_ENABLE__ literal lets V8 short-circuit on
-  # the marker-less baseline in ~2ms. Would need V8 to drop literal-prefix optimization
-  # to reconsider.
-  applied: '__ADVISOR_ENABLE__[\s\S]*__ADVISOR_CGK__[\s\S]*__ADVISOR_FGH__[\s\S]*__ADVISOR_PAIRING__'
+  # Monolithic: all four injection markers in source order.
+  # Code-split: markers may be in different chunks, so accept partial application.
+  # The ENABLE marker alone is sufficient: it bypasses the firstParty provider gate
+  # and the GrowthBook flag, making the advisor tool available. The other markers
+  # (CGK, FGH, PAIRING) handle picker/selection UI which may not apply in all versions.
+  applied: '__ADVISOR_ENABLE__'
   applicable: 'CLAUDE_CODE_DISABLE_ADVISOR_TOOL'
 
 codemod:

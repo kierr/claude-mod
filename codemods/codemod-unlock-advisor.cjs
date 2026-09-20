@@ -58,13 +58,25 @@ const CGK_ANCHOR = /function [\w$]+\(\) \{\n(?=([ \t]*)return [\w$]+\.CLAUDE_COD
 // line — same reason as CGK_ANCHOR (avoids consuming/doubling the body indent).
 const FGH_ANCHOR = /function [\w$]+\([\w$]+\) \{\n(?=([ \t]*)if \(![\w$]+\([\w$]+\)\) \{\n[ \t]*return false;\n[ \t]*\}\n[ \t]*if \([\w$]+\.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL\))/;
 
+// Code-split variant: the DISABLE check uses property access on an env object
+// (a.CLAUDE_CODE_DISABLE_ADVISOR_TOOL) and may be ORed with a boolean flag.
+//   function qdt() {
+//     if (a.CLAUDE_CODE_DISABLE_ADVISOR_TOOL || Fst) {
+//       return false;
+//     }
+//     return De() === "firstParty" && Hy();
+//   }
+const DISABLE_BLOCK_CODESPLIT = /([ \t]*)if \([\w$]+\.CLAUDE_CODE_DISABLE_ADVISOR_TOOL(?:\s*\|\|\s*[\w$]+)?\) \{\n[ \t]*return false;\n[ \t]*\}\n/;
+
 function transform(code) {
   let output = code;
   let changed = 0;
 
-  // Injection 1 — Pc() master enable. Idempotent via the ENABLE marker.
+  // Injection 1 — master enable. Idempotent via the ENABLE marker.
+  // Try monolithic pattern first, then code-split variant.
   if (!code.includes(ENABLE_MARKER)) {
-    const m = code.match(DISABLE_BLOCK);
+    let m = code.match(DISABLE_BLOCK);
+    if (!m) m = code.match(DISABLE_BLOCK_CODESPLIT);
     if (m) {
       const indent = m[1];
       const guard =
@@ -79,9 +91,10 @@ function transform(code) {
     }
   }
 
-  // Injection 2 — nGK() pairing bypass. Idempotent via the PAIRING marker.
+  // Injection 2 — pairing bypass. Idempotent via the PAIRING marker.
+  // Try monolithic pattern first, then code-split variant.
   if (!output.includes(PAIRING_MARKER)) {
-    const m = output.match(PAIRING_ANCHOR);
+    let m = output.match(PAIRING_ANCHOR);
     if (m) {
       const indent = m[1];
       const advisorVar = m[2];
@@ -94,13 +107,42 @@ function transform(code) {
       output = output.replace(m[0], () => m[0] + guard);
       changed++;
     } else {
-      console.error("unlock_advisor: nGK pairing resolver not found — bundle may have drifted (injection 1 still applied).");
+      // Code-split variant: the pairing function uses a different structure.
+      //   function Kfe(e, n) {
+      //     if (!sb() || !e) { return; }
+      //     let r = er(Rt(e));
+      //     if (!eN(n)) { t(`[AdvisorTool] Skipping advisor - base model ...`); ... return; }
+      // We inject after the let-binding for the advisor var, before the base-model check.
+      const pairingCodeSplit = /([ \t]*)let ([\w$]+) = [\w$]+\([^;\n]*\);\n(?=[ \t]*if \(![\w$]+\([\w$]+\)\) \{\n[ \t]*[\w$]+\(`\[AdvisorTool\] Skipping advisor - base model)/;
+      m = output.match(pairingCodeSplit);
+      if (m) {
+        const indent = m[1];
+        const advisorVar = m[2];
+        const logger = 't'; // code-split uses single-char logger
+        const guard =
+          `${indent}if (typeof __isModEnabled__ === "function" && __isModEnabled__("${MOD_ID}")) {\n` +
+          `${indent}  ${logger}(\`[AdvisorTool] Server-side tool enabled with \${${advisorVar}} as the advisor model (pairing bypassed)\`);\n` +
+          `${indent}  return ${advisorVar}; ${PAIRING_MARKER}\n` +
+          `${indent}}\n`;
+        output = output.replace(m[0], () => m[0] + guard);
+        changed++;
+      } else {
+        console.error("unlock_advisor: nGK pairing resolver not found — bundle may have drifted (injection 1 still applied).");
+      }
     }
   }
 
   // Injection 3 — cGK() selection/UI chokepoint. Idempotent via the CGK marker.
   if (!output.includes(CGK_MARKER)) {
-    const m = output.match(CGK_ANCHOR);
+    // Try code-split variant first (more specific: matches sb() with !fn() guard)
+    // before the monolithic CGK_ANCHOR (which would incorrectly match JTe()).
+    // Code-split: function sb() { if (!qdt()) { return false; } if (a.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL) { ... } }
+    const cgkCodeSplit = /function [\w$]+\(\) \{\n(?=([ \t]*)if \(![\w$]+\(\)\) \{\n[ \t]*return false;\n[ \t]*\}\n[ \t]*if \([\w$]+\.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL\))/;
+    let m = output.match(cgkCodeSplit);
+    let matchedCodeSplit = !!m;
+    if (!m) {
+      m = output.match(CGK_ANCHOR);
+    }
     if (m) {
       const indent = m[1];
       const guard =
@@ -116,7 +158,16 @@ function transform(code) {
 
   // Injection 4 — fGH() advisor-validity gate. Idempotent via the FGH marker.
   if (!output.includes(FGH_MARKER)) {
-    const m = output.match(FGH_ANCHOR);
+    // Try code-split variant first: simple function returning the env var.
+    // E.g., function JTe() { return a.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL; }
+    // This must run before the monolithic FGH_ANCHOR to avoid matching JTe() as FGH
+    // when it should be CGK (in code-split, JTe() is the simple reader = fGH equivalent,
+    // while sb() is the compound check = cGK equivalent).
+    const fghCodeSplit = /function [\w$]+\(\) \{\n(?=([ \t]*)return [\w$]+\.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL;)/;
+    let m = output.match(fghCodeSplit);
+    if (!m) {
+      m = output.match(FGH_ANCHOR);
+    }
     if (m) {
       const indent = m[1];
       const guard =

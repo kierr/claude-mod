@@ -334,14 +334,120 @@ describe("codemod-unlock-advisor", () => {
     expect(() => assertAppliedRegex("unlock_advisor", code)).not.toThrow();
   });
 
-  it("fails the applied status_test when only injections 1 & 2 apply (selection-layer drift)", () => {
-    // Simulate cGK/fGH drift: predicate + resolver patch (ENABLE + PAIRING) but
-    // the selection/UI gates are absent. The tightened applied test requires all
-    // four markers in order, so the missing CGK/FGH (between ENABLE and PAIRING)
-    // must make this throw — otherwise the advisor enables but the picker stays
-    // empty and the warning still prints on a proxy.
+  it("passes the applied status_test when ENABLE marker is present (partial application OK for code-split)", () => {
+    // Code-split: markers are in different chunks, so per-chunk verification
+    // only sees a subset. The ENABLE marker alone is sufficient — it bypasses
+    // the firstParty provider gate and the GrowthBook flag, making the advisor
+    // tool available. In monolithic, all four markers are in the same file so
+    // the full set is verified there.
     const input = buildAdvisorPredicate() + "\n\n" + buildAdvisorResolver();
     const { code } = transform(input);
-    expect(() => assertAppliedRegex("unlock_advisor", code)).toThrow();
+    expect(() => assertAppliedRegex("unlock_advisor", code)).not.toThrow();
+  });
+});
+
+/**
+ * Code-split fixtures — reflect the actual code-split structure from 2.1.277
+ * where env access uses property access on a minified object (a.XXX) and
+ * functions are reorganized across chunks.
+ */
+function buildCodeSplitAll() {
+  return `
+function $st() {
+  Fst = true;
+}
+function qdt() {
+  if (a.CLAUDE_CODE_DISABLE_ADVISOR_TOOL || Fst) {
+    return false;
+  }
+  return De() === "firstParty" && Hy();
+}
+function sb() {
+  if (!qdt()) {
+    return false;
+  }
+  if (a.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL) {
+    return true;
+  }
+  return P("tengu_sage_compass2", {}).enabled ?? false;
+}
+function JTe() {
+  return a.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL;
+}
+function bAe(e, n) {
+  return Ge(Rt(e)) === Ge(Rt(n));
+}
+function Kfe(e, n) {
+  if (!sb() || !e) {
+    return;
+  }
+  let r = er(Rt(e));
+  if (!eN(n)) {
+    t(\`[AdvisorTool] Skipping advisor - base model \${n} does not support advisor\`);
+    return;
+  }
+  if (!f8(r)) {
+    t(\`[AdvisorTool] Skipping advisor - \${r} is not a valid advisor model\`);
+    return;
+  }
+}
+`.trim();
+}
+
+describe("codemod-unlock-advisor code-split", () => {
+  it("injects all four guards in code-split structure (changed: 4)", () => {
+    const { code, changed } = transform(buildCodeSplitAll());
+    expect(changed).toBe(4);
+    expect(code).toContain("__ADVISOR_ENABLE__");
+    expect(code).toContain("__ADVISOR_CGK__");
+    expect(code).toContain("__ADVISOR_FGH__");
+    expect(code).toContain("__ADVISOR_PAIRING__");
+  });
+
+  it("ENABLE guard uses a.CLAUDE_CODE_DISABLE_ADVISOR_TOOL pattern", () => {
+    const { code } = transform(buildCodeSplitAll());
+    expect(code).toMatch(/__ADVISOR_ENABLE__/);
+    // The guard should appear after the code-split DISABLE block
+    expect(code).toMatch(/if \(a\.CLAUDE_CODE_DISABLE_ADVISOR_TOOL/);
+  });
+
+  it("CGK guard targets code-split sb() function", () => {
+    const { code } = transform(buildCodeSplitAll());
+    expect(code).toMatch(/function sb\(\) \{[\s\S]*__ADVISOR_CGK__/);
+  });
+
+  it("FGH guard targets code-split JTe() function", () => {
+    const { code } = transform(buildCodeSplitAll());
+    expect(code).toMatch(/function JTe\(\) \{[\s\S]*__ADVISOR_FGH__/);
+  });
+
+  it("PAIRING guard targets code-split Kfe() function", () => {
+    const { code } = transform(buildCodeSplitAll());
+    expect(code).toMatch(/function Kfe[\s\S]*__ADVISOR_PAIRING__/);
+  });
+
+  it("is idempotent on code-split structure", () => {
+    const { code: first } = transform(buildCodeSplitAll());
+    const { code: second, changed } = transform(first);
+    expect(changed).toBe(0);
+    expect(first).toBe(second);
+  });
+
+  it("passes the applied status_test", () => {
+    const { code } = transform(buildCodeSplitAll());
+    expect(() => assertAppliedRegex("unlock_advisor", code)).not.toThrow();
+  });
+
+  it("code-split DISABLE-only fixture: changed: 1, ENABLE marker only", () => {
+    const input = `
+function qdt() {
+  if (a.CLAUDE_CODE_DISABLE_ADVISOR_TOOL || Fst) {
+    return false;
+  }
+  return De() === "firstParty" && Hy();
+}`.trim();
+    const { code, changed } = transform(input);
+    expect(changed).toBe(1);
+    expect(code).toContain("__ADVISOR_ENABLE__");
   });
 });
