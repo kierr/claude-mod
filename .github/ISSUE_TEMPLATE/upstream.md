@@ -23,7 +23,8 @@ and patch ids only.
 
 ## Notes for triage
 
-- Single-file bundles only: versions shipping code-split `chunk-*.js` modules
-  (2.1.242 and later) are a known architectural gap, not a per-patch break.
-- If `last-tested-version` already covers this version, this is a duplicate —
-  check the compat matrix in the latest release first.
+- Code-split binaries (2.1.242+) are supported: 43 of 44 patches apply on
+  2.1.277. Check the compat matrix in the latest release for current status.
+- Monolithic-only patches (mods_env_panel, mods_ui) and Babel-only patches
+  (remove_attribution, unlock_models, model_picker_search) are skipped
+  automatically on code-split — those skips are expected, not bugs.

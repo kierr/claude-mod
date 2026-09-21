@@ -282,7 +282,7 @@ function transform(code) {
   code = e.code;
   totalChanged += e.changed;
 
-  if (totalChanged > 0 && !alreadyPatched) {
+  if (totalChanged >= 1 && !alreadyPatched) {
     // On code-split binaries, sub-patches land in separate chunks; don't
     // require all 5 to emit the marker — any successful sub-patch writes it
     // so the applied-test can detect progress.  On monolithic, all 5 land

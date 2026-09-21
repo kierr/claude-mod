@@ -121,7 +121,7 @@ function transform(code) {
 
   // In code-split, the three sites may be in one chunk (che function) or
   // split across chunks. Accept any positive change count.
-  if (totalChanged > 0) {
+  if (totalChanged >= 1) {
     const marker = "\nvar __ssp_patched__ = true;\n";
     const firstFunc = code.indexOf("function ");
     if (firstFunc > 0) {

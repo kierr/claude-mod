@@ -16,7 +16,9 @@ I have included a skill for creating new Mods. There is also a skill for maintai
 
 **Supported release: Claude Code 2.1.181 on macOS.**
 
-I had it working on Linux too, with Claude Code Actions, I'll work on getting that up next, along with the latest version. I had in git history, compatibility back to ~1.3, but I've squashed everything before makin this public.
+I had it working on Linux too, with Claude Code Actions, I'll work on getting that up next, along with the latest version. I had in git history, compatibility back to ~1.3, but I've squashed everything before making this public.
+
+Starting with 2.1.242, Claude Code ships as code-split ESM chunks instead of a single bundled file. claude-mod handles this automatically, and 43 of 44 patches apply to 2.1.277. The remaining patches are either genuinely unnecessary (the new cron system already supports permanent tasks), blocked by a deobfuscation format that the Babel parser can't handle (3 Babel-only patches), or require a redesigned approach for the new HTTP pipeline (cache keepalive). These gaps are tracked in `CODESPLIT_SKIP_PATCHES` inside `bin/patch.cjs`. The supported release stays at 2.1.181 until a fresh-install gate passes for a code-split version.
 
 ~
 

@@ -1,5 +1,6 @@
 # Source-only CI. macOS/2.1.181 runtime verification is performed locally;
-# Linux and newer upstream versions are not supported by the first release.
+# code-split (2.1.242+) is partially supported (43/44 patches on 2.1.277).
+# Linux and newer upstream versions are not fully supported by the first release.
 # Never cache/upload upstream bundles or derived artifacts.
 name: CI
 on:

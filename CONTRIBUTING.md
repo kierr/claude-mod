@@ -1,6 +1,6 @@
 # Contributing to claude-mod
 
-The first release supports Claude Code **2.1.181 on macOS**. Linux runtime support and newer upstream versions require separate compatibility work.
+The first release supports Claude Code **2.1.181 on macOS**. Code-split binaries (2.1.242+) are partially supported: 43/44 patches apply on 2.1.277, with remaining gaps tracked in `CODESPLIT_SKIP_PATCHES`. Linux runtime support requires separate verification.
 
 ## Scope
 

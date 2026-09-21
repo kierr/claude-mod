@@ -2,7 +2,7 @@
 
 ## Scope and distribution
 
-The supported release is Claude Code 2.1.181 on macOS; fresh-install verification currently covers Apple Silicon. Linux and newer upstream compatibility are separate work, not implicit prerequisites for an unrelated change. Keep support claims aligned with actual verification and `last-tested-version`.
+The supported release is Claude Code 2.1.181 on macOS; fresh-install verification currently covers Apple Silicon. Linux and newer upstream compatibility are separate work, not implicit prerequisites for an unrelated change. Keep support claims aligned with actual verification and `last-tested-version`. Code-split binaries (2.1.242+) are partially supported: 43/44 patches apply on 2.1.277, with the remaining gaps tracked in `CODESPLIT_SKIP_PATCHES`.
 
 Ship the tool and authored transformations only. Keep upstream binaries, extracted/deobfuscated code, prompt excerpts, derived deltas, caches, and private sessions out of git, packages, CI artifacts, and reports. Tests use hand-written synthetic fixtures. Automated scans help detect leaks but cannot establish provenance.
 
@@ -33,7 +33,7 @@ actionlint
 
 Add regression tests for changed behavior, near misses, and idempotence. Run the whole suite before calling a change verified. Keep the lockfile synchronized rather than bypassing frozen installation.
 
-For runtime or packaging changes, also test the packed tool in a fresh HOME on the supported platform. A cached baseline does not prove the download/extract/deobfuscation path. The local runtime gate is `mise run gate:version-compat`; its current expected outcome is 43 applied, 0 failed, and one version-gated skip (`model_picker_search`). Check offline `--version` and `--help`; do not invoke paid inference as an incidental smoke test.
+For runtime or packaging changes, also test the packed tool in a fresh HOME on the supported platform. A cached baseline does not prove the download/extract/deobfuscation path. The local runtime gate is `mise run gate:version-compat`; its current expected outcome is 43 applied, 0 failed, and one version-gated skip (`model_picker_search`) on 2.1.181. On 2.1.277, the same 43 patches apply with 6 code-split skips. Check offline `--version` and `--help`; do not invoke paid inference as an incidental smoke test.
 
 webcrack 2.15.1 is pinned in the pipeline and installer. Validate its output without heuristic rewriting. If generation fails, locate the first failing stage and compare untouched producer output with post-processing using the same input, version, and flags. A syntax error moving later is not evidence of a semantically correct repair.
 
