@@ -20,3 +20,7 @@ dist/
 patches/env-catalog.discovered.json
 autoresearch.jsonl
 hack/
+
+# Bun cache and temp fixtures
+Library/
+test/fixtures/temp-*
