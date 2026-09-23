@@ -1,0 +1,23 @@
+id: "unlock_effort_instructions"
+target: "claude-code"
+name: "Effort Instructions for Custom Models"
+description: "Inject effort level instructions into the system prompt for non-Anthropic models."
+file_id: "cli"
+
+status_tests:
+  # applied: effort fallback block exists with __isModEnabled__ guard
+  applied: '__isModEnabled__\(\s*["\x27]unlock_effort_instructions["\x27]\s*\)'
+  # applicable: ultrathink_effort string exists but no mod guard yet
+  applicable: 'ultrathink_effort'
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-effort-instructions.cjs"
+
+
+mod:
+  section: "unlock"
+  live: true
+  category: "model"
+
+order: 12

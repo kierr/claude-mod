@@ -1,0 +1,28 @@
+id: "add_cache_keepalive"
+target: "claude-code"
+name: "Prompt-cache keepalive"
+description: "Periodically replays the last /v1/messages request while idle, with streaming disabled and max_tokens set to 1. Responses are discarded rather than added to the transcript. This may refresh a provider's prompt cache, but requests can incur charges and cache behavior is provider-dependent. Disabled by default."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__CACHE_KEEPALIVE_INSTALLED__'
+  applicable: 'lastApiCompletionTimestamp'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-add-cache-keepalive.cjs"
+
+mod:
+  live: true
+  category: "features"
+  config:
+    # Keep the interval below the provider's documented cache TTL.
+    # Each replay may incur input/cache and output charges, even with max_tokens: 1.
+    - key: "intervalMs"
+      type: "number"
+      default: 240000
+      label: "Keepalive interval (ms)"
+
+order: 20

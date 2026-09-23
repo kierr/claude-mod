@@ -1,0 +1,20 @@
+id: "native_binary_compat"
+target: "claude-code"
+name: "Native Binary Compatibility"
+description: "Two fixes for the patched CLI: (1) force the Fz()/EA() native-binary check true so the native code paths stay active — without it, the embedded bfs/ugrep grep shadow and bundled ripgrep resolution break and grep/search stop working; (2) change the auth status initializer from 'missing' to 'loading' so the status bar shows a spinner instead of 'Not logged in'. The bg-worker spawn break that EA-forcing would cause (QF/u3m/posix_spawn omitting the JS script path) is handled by the separate spawn_script_path patch."
+file_id: "cli"
+
+status_tests:
+  applied: '__nbc_patched__'
+  applicable: 'Bun.embeddedFiles'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-native-binary-compat.cjs"
+
+mod:
+  live: false
+  category: "features"
+
+order: 0

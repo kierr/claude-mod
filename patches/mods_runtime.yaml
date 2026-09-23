@@ -1,0 +1,19 @@
+id: "mods_runtime"
+target: "claude-code"
+name: "Mods Runtime"
+description: "Runtime helpers for the Mods panel: injects __isModEnabled__() and __getModConfig__() with a 2-second TTL cache."
+file_id: "cli"
+
+status_tests:
+  applicable: 'PACKAGE_URL|@bun-cjs'
+  applied: 'function __getModConfig__\(id'
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-inject-mods-runtime.cjs"
+
+mod:
+  section: "core"
+  live: true
+  category: "system"
+order: 1

@@ -1,0 +1,3 @@
+[test]
+# Allow time for codemod subprocesses and Babel parsing.
+timeout = 30000

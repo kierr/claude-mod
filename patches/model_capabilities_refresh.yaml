@@ -1,0 +1,37 @@
+id: "model_capabilities_refresh"
+target: "claude-code"
+name: "Auto-Refresh model-capabilities cache"
+description: >-
+  Revive the dead model-capabilities populator so ~/.claude/cache/model-capabilities.json
+  (the file set_model_limits reads) is auto-refreshed from the gateway's /v1/models on
+  launch. The populator ships fully built but INERT — dual-blocked by a hardcoded
+  `return false` gate and the nonessential-traffic guard (ta()), so under
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC the file is never rewritten by the client
+  (a `timestamp:0` marks a hand/externally-populated file). This patch mod-guards BOTH
+  leading guards in the populator so they fire only when this mod is disabled; enabled,
+  the populator fetches /v1/models and writes the cache. Safe by construction: it only
+  overwrites when the fetch returns a non-empty DIFFERENT list and is try/catch-wrapped,
+  so a failed/empty gateway response cannot wipe a good hand-populated entry. This is
+  the second nonessential-traffic carve-out after unlock_models (the picker) — both are
+  /v1/models metadata fetches, not background telemetry. Default-OFF (adds a launch fetch).
+file_id: "cli"
+order: 61
+
+status_tests:
+  # Injected mod-guard marker — present iff both populator guards were rewritten.
+  # Unique to this patch's output; absent on the baseline.
+  applied: '__isModEnabled__\(\s*["\x27]model_capabilities_refresh["\x27]\s*\)'
+  # The populator's debug log label — stable string literal marking the populator exists.
+  # (Still present post-patch; applied is the authoritative success signal. No [\s\S].)
+  applicable: '\[modelCapabilities\]'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-model-capabilities-refresh.cjs"
+
+mod:
+  section: "model"
+  live: true
+  category: "reliability"
+  config: []

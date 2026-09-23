@@ -1,0 +1,37 @@
+id: "set_auto_dream"
+target: "claude-code"
+name: "Auto-Dream Mode"
+description: "Enable auto-dream regardless of GrowthBook flags and override scheduling thresholds."
+file_id: "cli"
+
+
+status_tests:
+  # The applied check matches the threshold override, not each injection independently.
+  # Use a literal marker rather than an unanchored cross-function lookahead.
+  applied: '__getModConfig__\(\s*["\x27]set_auto_dream["\x27]'
+
+  # applicable: function reads tengu_onyx_plover AND returns minHours/minSessions (NT5 pattern)
+  # OR function accesses autoDreamEnabled (y5_ pattern) — either signals the target exists
+  applicable: '(autoDreamEnabled|[\w$]+\(\s*["\x27]tengu_onyx_plover["\x27]\s*,\s*null\s*\)[\s\S]{0,2000}?return\s*\{[\s\S]{0,500}?minHours:)'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-set-auto-dream.cjs"
+
+mod:
+  live: true
+  category: "features"
+  config:
+    - key: "min_hours"
+      type: "number"
+      default: 6
+      min: 1
+      label: "Min hours before auto-dream"
+    - key: "min_sessions"
+      type: "number"
+      default: 5
+      min: 1
+      label: "Min sessions before auto-dream"
+
+order: 2

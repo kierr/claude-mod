@@ -1,0 +1,23 @@
+id: "display_endpoint_label"
+target: "claude-code"
+name: "Show Custom API Endpoint"
+description: "Replace the billing label with the ANTHROPIC_BASE_URL hostname when using a custom API endpoint."
+file_id: "cli"
+
+status_tests:
+  # applied: the replacement contains new URL(process.env.ANTHROPIC_BASE_URL).host
+  applied: 'new URL\(process\.env\.ANTHROPIC_BASE_URL\)\.host'
+  # applicable: ternary with two zero-arg calls and the "API Usage Billing" string literal
+  # \s* tolerates whitespace around ternary operators in deobfuscated output
+  applicable: '[\w$]+\(\)\s*\?\s*[\w$]+\(\)\s*:\s*"API Usage Billing"'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-display-endpoint-label.cjs"
+
+
+mod:
+  live: true
+  category: "model"
+order: 50

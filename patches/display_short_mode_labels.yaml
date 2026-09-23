@@ -1,0 +1,24 @@
+id: "display_short_mode_labels"
+target: "claude-code"
+name: "Short Mode Labels"
+description: "Shorten permission mode labels in the status bar from verbose forms like '⏵⏵ accept edits on (shift+tab to cycle)' to compact forms like '⏵⏵ accept'. Removes the 'on' suffix and chord hint, replaces multi-word titles with single-word shortTitles."
+file_id: "cli"
+order: 25
+
+
+status_tests:
+  # Monolithic: Plan Mode → Plan (most visible change). Code-split: may already be Plan,
+  # so also accept Bypass Permissions → Bypass or Accept edits → Edits.
+  applied: '__isModEnabled__\("display_short_mode_labels"\).*\?.*"(?:Plan|Bypass|Edits)"'
+  # Monolithic: 'Plan Mode' appears in the same file as the title strings.
+  # Code-split: 'Plan Mode' is in a different chunk; use 'Accept edits' which
+  # co-locates with the other title strings in the UI chunk.
+  applicable: 'Accept edits'
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-display-short-mode-labels.cjs"
+
+mod:
+  live: true
+  category: "display"

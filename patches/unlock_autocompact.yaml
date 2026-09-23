@@ -1,0 +1,22 @@
+id: "unlock_autocompact"
+target: "claude-code"
+name: "Auto-Compact Eligibility Fix"
+description: "Fix auto-compact never triggering for most non-Anthropic models. Upstream added 'model-default' as an accepted source, but only claude-sonnet-4-6 and claude-opus-4-6 produce it. All other models (opus-4-7, opus-4-8, custom models) still resolve to source 'auto' which is rejected. This patch adds 'auto' as an accepted source."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__isModEnabled__\(\s*"unlock_autocompact"\s*\)[^;\n]{0,40}===\s*"auto"'
+  # Allow intermediate source names within a bounded span.
+  applicable: 'model-default'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-autocompact.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "reliability"
+order: 17

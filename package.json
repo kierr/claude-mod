@@ -1,0 +1,53 @@
+{
+  "name": "claude-mod",
+  "version": "1.0.0",
+  "description": "Patch Claude Code CLI locally for third-party providers: download, deobfuscate, apply mod patches, run under Bun. Tool only — never ships Anthropic code.",
+  "type": "commonjs",
+  "bin": {
+    "claude-mod": "bin/patch.cjs"
+  },
+  "files": [
+    "bin/patch.cjs",
+    "bin/batch-apply.cjs",
+    "bin/extract-js-from-bun-binary.cjs",
+    "bin/webcrack-pipeline.cjs",
+    "bin/discover-env-vars.cjs",
+    "bin/lint-codemods.cjs",
+    "bin/fixture-audit.cjs",
+    "bin/tui-smoke-test.exp",
+    "lib/",
+    "patches/*.yaml",
+    "patches/env-catalog.json",
+    "codemods/",
+    "last-tested-version",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "test:unit": "bun test test/unit/*.test.js",
+    "test:integration": "bun test test/integration/*.test.js",
+    "test:coverage": "bun test --coverage",
+    "prepublishOnly": "bun test test/unit/ && node bin/lint-codemods.cjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kierr/claude-mod.git"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@babel/generator": "^7.26.0",
+    "@babel/parser": "^7.26.0",
+    "@babel/traverse": "^7.26.0",
+    "@babel/types": "^7.26.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "workspaces": [
+    "codemods"
+  ]
+}

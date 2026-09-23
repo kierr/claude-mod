@@ -1,0 +1,25 @@
+id: "model_picker_search"
+target: "claude-code"
+name: "Model Picker Search"
+description: "Adds a /-to-search filter bar to the /model picker (mirrors the Mods panel search UX). Type to filter models by name/description/value; Enter or down exits search and focuses the first match; Esc clears the query."
+file_id: "cli"
+order: 20
+
+status_tests:
+  # Require the wrapper, keymap action and handler together.
+  # A leading literal avoids scanning a marker-free baseline with an unbounded lookahead.
+  applied: '__ModelSearchSelect__[\s\S]*"modelPicker:search"[\s\S]*modelPicker:search'
+  # applicable: requires keysDeferred prop on the Select component.
+  # This prop only exists in code-split versions (2.1.242+) where the
+  # model picker uses deferred keymaps. Not present in 2.1.181 monolithic.
+  applicable: 'keysDeferred'
+codemod:
+  type: "node_script"
+  engine: "babel"
+  script: "codemods/codemod-model-picker-search.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "model"
+  config: []

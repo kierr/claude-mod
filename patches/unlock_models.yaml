@@ -1,0 +1,24 @@
+id: "unlock_models"
+target: "claude-code"
+name: "Show All Models in Picker"
+description: "Remove provider gates, model filters, and the nonessential-traffic guard so all models from the API appear in the model picker (including under CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)."
+file_id: "cli"
+order: 19
+
+status_tests:
+  # Require the generic mod guard and the discovery-fetcher guard together so a
+  # partial unlock does not verify successfully. Keep a leading literal before
+  # any cross-site scan; an unanchored leading lookahead can become quadratic.
+  applied: '__isModEnabled__\(\s*["\x27]unlock_models["\x27]\s*\)[\s\S]*!\(\s*typeof\s+__isModEnabled__\s*===\s*["\x27]function["\x27]\s*&&'
+  applicable: 'claude\|anthropic'
+
+codemod:
+  type: "node_script"
+  engine: "babel"
+  script: "codemods/codemod-unlock-models.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "model"
+  config: []

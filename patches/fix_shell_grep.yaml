@@ -1,0 +1,20 @@
+id: "fix_shell_grep"
+target: "claude-code"
+name: "Fix Broken Grep/Find in Shell"
+description: "Replace broken ugrep/bfs shell functions with working system grep and find."
+file_id: "cli"
+order: 9
+
+status_tests:
+  applied: '__DUS__'
+  applicable: '"grep",\s*"ugrep"'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-fix-shell-grep.cjs"
+
+mod:
+  live: true
+  category: "features"
+  config: []

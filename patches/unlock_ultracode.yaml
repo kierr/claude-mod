@@ -1,0 +1,22 @@
+id: "unlock_ultracode"
+target: "claude-code"
+name: "Ultracode Mode"
+description: "Enable ultracode effort level for non-Anthropic models. Patches the xhigh and max model capability checks so any model can use ultracode (xhigh effort + dynamic workflow orchestration)."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__isModEnabled__\(\s*["\x27]unlock_ultracode["\x27]\s*\)'
+  applicable: 'xhigh_effort'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-ultracode.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "model"
+
+order: 8

@@ -1,0 +1,27 @@
+node_modules/
+.cache/claude-mods/
+*.backup
+*.tgz
+dist/
+.DS_Store
+/bun
+
+# Agent session artifacts
+.agents/
+.claude/*
+!/.claude/settings.local.json
+!/.claude/skills/
+.pi/
+.planning/
+*.db
+*.db-shm
+*.db-wal
+
+# Locally generated metadata and scratch
+patches/env-catalog.discovered.json
+autoresearch.jsonl
+hack/
+
+# Bun cache and temp fixtures
+Library/
+test/fixtures/temp-*

@@ -1,0 +1,23 @@
+id: "unlock_remote"
+target: "claude-code"
+name: "Remote Sessions & CCR"
+description: "Enable CCR, remote sessions, teleport, and remote-env regardless of feature flags and policy gates. OAuth authentication is still required."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__isModEnabled__\(\s*["\x27]unlock_remote["\x27]\s*\).{0,200}allow_remote_sessions'
+  applicable: 'allow_remote_sessions'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-unlock-remote.cjs"
+
+mod:
+  section: "unlock"
+  backend_required: true
+  live: true
+  category: "remote"
+order: 7
+

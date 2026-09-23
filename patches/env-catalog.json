@@ -1,0 +1,85 @@
+{
+  "_meta": {
+    "format": "env-catalog/v1",
+    "description": "Curated Environment-tab metadata. Curated entries override optional locally discovered entries by name. The UI treats environment edits as restart-required; discovery is not automatic.",
+    "live_default": "restart"
+  },
+  "curated": [
+    { "name": "ANTHROPIC_BASE_URL", "category": "Provider & Auth", "type": "string", "default": "", "summary": "Base URL for the messages API.", "detail": "Use a compatible gateway endpoint. This setting also affects provider detection; it does not redirect every background service.", "recommend_if": "non_anthropic_base_url" },
+    { "name": "ANTHROPIC_AUTH_TOKEN", "category": "Provider & Auth", "type": "secret", "default": "", "summary": "Bearer token sent as Authorization: Bearer <value>.", "detail": "Primary auth for gateway/proxy setups. Prefer putting this in managed-settings so it cannot be overridden; in user settings.json it is overridable by shell env.", "recommend_if": "auth_token_user_settings" },
+    { "name": "ANTHROPIC_API_KEY", "category": "Provider & Auth", "type": "secret", "default": "", "summary": "API key sent as x-api-key header.", "detail": "Used by first-party Anthropic auth and some gateways expecting the api-key format. Mutually exclusive with ANTHROPIC_AUTH_TOKEN in most flows." },
+
+    { "name": "ANTHROPIC_DEFAULT_OPUS_MODEL", "category": "Model Routing", "type": "string", "default": "", "summary": "Model slug for the Opus slot.", "detail": "Append [1m] for a per-model 1M context window (stock mechanism, stripped on the wire)." },
+    { "name": "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "category": "Model Routing", "type": "string", "default": "", "summary": "Display name for the Opus slot in /model." },
+    { "name": "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION", "category": "Model Routing", "type": "string", "default": "", "summary": "Picker description for the Opus slot." },
+    { "name": "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES", "category": "Model Routing", "type": "string", "default": "", "summary": "Capabilities advertised for the Opus slot (e.g. thinking,interleaved_thinking)." },
+    { "name": "ANTHROPIC_DEFAULT_SONNET_MODEL", "category": "Model Routing", "type": "string", "default": "", "summary": "Model slug for the Sonnet slot." },
+    { "name": "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "category": "Model Routing", "type": "string", "default": "", "summary": "Display name for the Sonnet slot." },
+    { "name": "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION", "category": "Model Routing", "type": "string", "default": "", "summary": "Picker description for the Sonnet slot." },
+    { "name": "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES", "category": "Model Routing", "type": "string", "default": "", "summary": "Capabilities advertised for the Sonnet slot." },
+    { "name": "ANTHROPIC_DEFAULT_HAIKU_MODEL", "category": "Model Routing", "type": "string", "default": "", "summary": "Model slug for the Haiku slot." },
+    { "name": "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", "category": "Model Routing", "type": "string", "default": "", "summary": "Display name for the Haiku slot." },
+    { "name": "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION", "category": "Model Routing", "type": "string", "default": "", "summary": "Picker description for the Haiku slot." },
+    { "name": "ANTHROPIC_DEFAULT_FABLE_MODEL", "category": "Model Routing", "type": "string", "default": "", "summary": "Model slug for the Fable slot.", "detail": "Also affects Fable availability. Prefer this configuration path over a separate availability patch when supported by your upstream version." },
+    { "name": "ANTHROPIC_CUSTOM_MODEL_OPTION", "category": "Model Routing", "type": "string", "default": "", "summary": "Adds an extra entry to the /model picker." },
+    { "name": "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "category": "Model Routing", "type": "string", "default": "", "summary": "Display name for the custom model entry." },
+    { "name": "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION", "category": "Model Routing", "type": "string", "default": "", "summary": "Picker description for the custom model entry." },
+    { "name": "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "category": "Model Routing", "type": "boolean", "default": "false", "summary": "Populate /model from the gateway's /v1/models endpoint.", "detail": "Combined with the gateway_models_unfilter mod to show all models unfiltered." },
+
+    { "name": "CLAUDE_ENABLE_STREAM_WATCHDOG", "category": "Streaming & Reliability", "type": "boolean", "default": "false", "summary": "Event-level stream watchdog — aborts stalled connections.", "detail": "Off by default; effectively required for third-party providers. Detects stalls at the parsed-event level.", "recommend_if": "non_anthropic_base_url" },
+    { "name": "CLAUDE_ENABLE_BYTE_WATCHDOG", "category": "Streaming & Reliability", "type": "boolean", "default": "false", "summary": "Byte-level stream watchdog.", "detail": "Default is Anthropic-API-only; proxy connections don't get it. Catches TCP stalls the event watchdog misses.", "recommend_if": "non_anthropic_base_url" },
+    { "name": "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING", "category": "Streaming & Reliability", "type": "boolean", "default": "false", "summary": "Stream large tool inputs (Write/Edit) progressively.", "detail": "Off by default for gateway connections; without it, large tool inputs appear to hang until fully generated." },
+    { "name": "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "category": "Streaming & Reliability", "type": "boolean", "default": "false", "summary": "Keep the non-streaming fallback path enabled when 0.", "detail": "The fallback bridges the streaming loop to the SDK retry layer. Disabling (1) trades hangs for zero recovery from transient errors." },
+    { "name": "ENABLE_PROMPT_CACHING_1H", "category": "Streaming & Reliability", "type": "boolean", "default": "false", "summary": "Extend prompt cache TTL 5min -> 1hr (Anthropic-only).", "detail": "Higher write cost but amortizes with heavy agent usage. Ignored by non-Anthropic providers." },
+    { "name": "API_TIMEOUT_MS", "category": "Limits & Timeouts", "type": "number", "default": "300000", "summary": "Per-request timeout (ms).", "detail": "Non-streaming fallback inherits this; a dead connection hangs for the full timeout. Watchdogs handle slow-but-alive streams, so keep this modest.", "recommend_if": "retry_budget" },
+    { "name": "CLAUDE_CODE_MAX_RETRIES", "category": "Limits & Timeouts", "type": "number", "default": "10", "summary": "Max retries per request.", "detail": "High retry counts combined with long timeouts can delay failure substantially. Actual duration also depends on backoff and the retry policy.", "recommend_if": "retry_budget" },
+
+    { "name": "DISABLE_TELEMETRY", "category": "Telemetry & Privacy", "type": "boolean", "default": "false", "summary": "Opt out of all telemetry." },
+    { "name": "DISABLE_ERROR_REPORTING", "category": "Telemetry & Privacy", "type": "boolean", "default": "false", "summary": "Opt out of Sentry error reporting." },
+    { "name": "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "category": "Telemetry & Privacy", "type": "boolean", "default": "false", "summary": "Disable quality surveys." },
+    { "name": "DISABLE_COST_WARNINGS", "category": "Telemetry & Privacy", "type": "boolean", "default": "false", "summary": "Suppress cost warnings." },
+    { "name": "DISABLE_AUTOUPDATER", "category": "Telemetry & Privacy", "type": "boolean", "default": "false", "summary": "Block CLI self-update.", "detail": "Protects a patched version installed via claude-mod." },
+    { "name": "FORCE_AUTOUPDATE_PLUGINS", "category": "Telemetry & Privacy", "type": "boolean", "default": "false", "summary": "Keep plugin auto-updates working when DISABLE_AUTOUPDATER=1.", "detail": "Plugins don't touch the CLI binary." },
+    { "name": "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "category": "Telemetry & Privacy", "type": "boolean", "default": "false", "summary": "Disable nonessential network traffic (40+ gates).", "detail": "Any string value (even \"0\") triggers the disable via the raw if(process.env.VAR) check. Note: this also disables in-CLI GitHub PR CI status display." },
+    { "name": "ENABLE_CLAUDEAI_MCP_SERVERS", "category": "Telemetry & Privacy", "type": "boolean", "default": "true", "summary": "Enable claude.ai MCP servers.", "detail": "Disable when managing MCP servers yourself." },
+    { "name": "DISABLE_GROWTHBOOK", "category": "Telemetry & Privacy", "type": "boolean", "default": "false", "summary": "Skip the GrowthBook feature-flag fetch.", "detail": "Saves startup latency when the flag endpoint times out (e.g. third-party providers). Flags default to false." },
+
+    { "name": "CLAUDE_CODE_NO_FLICKER", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Enable fullscreen TUI rendering." },
+    { "name": "CLAUDE_CODE_DISABLE_FAST_MODE", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Hide or disable fast mode." },
+    { "name": "CLAUDE_CODE_DISABLE_1M_CONTEXT", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Must be 0 to honor the [1m] suffix on a model id.", "detail": "When 1, the per-model 1M context suffix is ignored." },
+    { "name": "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "category": "UI & UX", "type": "boolean", "default": "true", "summary": "Grayed-out prompt predictions after responses." },
+    { "name": "CLAUDE_CODE_NEW_INIT", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Interactive /init flow (asks which files to generate)." },
+    { "name": "CLAUDE_CODE_DISABLE_AUTO_MEMORY", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Force auto-memory on (0) or off (1); documents intent." },
+    { "name": "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "category": "Limits & Timeouts", "type": "number", "default": "", "summary": "Global cap on output tokens.", "detail": "Raising past 32000 can over-request some model slots when the bundle treats models identically." },
+    { "name": "ENABLE_TOOL_SEARCH", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Deferred MCP tool loading for large toolsets." },
+    { "name": "DISABLE_INSTALLATION_CHECKS", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Skip installation checks." },
+    { "name": "CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Show 'SandboxedBash' vs 'Bash' in the UI.", "detail": "Diagnostic for when/if the sandbox is active." },
+    { "name": "CLAUDE_CODE_ENABLE_AWAY_SUMMARY", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Force on the session recap (40-word summary after 5+ min idle).", "detail": "The GrowthBook flag for this returns false on third-party providers; this env override is needed. Costs one extra API call per return-from-idle." },
+
+    { "name": "DISABLE_UPGRADE_COMMAND", "category": "Hidden Commands", "type": "boolean", "default": "false", "summary": "Hide /upgrade." },
+    { "name": "DISABLE_LOGIN_COMMAND", "category": "Hidden Commands", "type": "boolean", "default": "false", "summary": "Hide /login (auth via token, not Claude.ai login)." },
+    { "name": "DISABLE_LOGOUT_COMMAND", "category": "Hidden Commands", "type": "boolean", "default": "false", "summary": "Hide /logout." },
+    { "name": "DISABLE_INSTALL_GITHUB_APP_COMMAND", "category": "Hidden Commands", "type": "boolean", "default": "false", "summary": "Hide the GitHub App install command." },
+    { "name": "DISABLE_EXTRA_USAGE_COMMAND", "category": "Hidden Commands", "type": "boolean", "default": "false", "summary": "Hide /extra-usage (managed provider-side)." },
+    { "name": "DISABLE_FEEDBACK_COMMAND", "category": "Hidden Commands", "type": "boolean", "default": "false", "summary": "Hide /feedback." },
+
+    { "name": "CLAUDE_CODE_FORK_SUBAGENT", "category": "Agent & Subagent", "type": "boolean", "default": "false", "summary": "Forked subagents inherit full conversation context.", "detail": "Consider input-token costs before enabling full-context inheritance." },
+    { "name": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "category": "Agent & Subagent", "type": "boolean", "default": "false", "summary": "Multi-agent coordination with shared task lists." },
+    { "name": "CLAUDE_AUTO_BACKGROUND_TASKS", "category": "Agent & Subagent", "type": "boolean", "default": "false", "summary": "Auto-background long-running agent tasks after ~2min." },
+
+    { "name": "BASH_DEFAULT_TIMEOUT_MS", "category": "Bash & Tooling", "type": "number", "default": "120000", "summary": "Default Bash timeout (ms)." },
+    { "name": "BASH_MAX_TIMEOUT_MS", "category": "Bash & Tooling", "type": "number", "default": "600000", "summary": "Max Bash timeout cap (ms). Background commands also respect this." },
+    { "name": "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "category": "Bash & Tooling", "type": "number", "default": "10", "summary": "Max parallel tool executions." },
+    { "name": "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS", "category": "Bash & Tooling", "type": "number", "default": "25000", "summary": "Max tokens per file read." },
+
+    { "name": "CLAUDE_CODE_MCP_INSTR_DELTA", "category": "MCP", "type": "boolean", "default": "false", "summary": "Delta MCP tool instructions." },
+    { "name": "CLAUDE_CODE_API_KEY_HELPER_TTL_MS", "category": "Provider & Auth", "type": "number", "default": "", "summary": "TTL for the API-key helper cache (ms)." },
+    { "name": "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "category": "UI & UX", "type": "boolean", "default": "false", "summary": "Drop the built-in git workflow instructions." }
+  ],
+
+  "rules": [
+    { "id": "non_anthropic_base_url", "severity": "recommend", "title": "Enable stream watchdogs for non-Anthropic providers", "when": "ANTHROPIC_BASE_URL is set and host is not api.anthropic.com", "suggest": { "CLAUDE_ENABLE_STREAM_WATCHDOG": "1", "CLAUDE_ENABLE_BYTE_WATCHDOG": "1", "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING": "1" }, "rationale": "Proxy/gateway connections don't get the byte watchdog by default; stalled streams hang without these." },
+    { "id": "retry_budget", "severity": "warn", "title": "Retry x timeout hang budget is large", "when": "CLAUDE_CODE_MAX_RETRIES * API_TIMEOUT_MS > 3600000", "suggest": {}, "rationale": "High retry counts and long timeouts can delay final failure. Check the selected retry policy as well as the per-request timeout." },
+    { "id": "auth_token_user_settings", "severity": "warn", "title": "Auth token in user settings.json is overridable", "when": "ANTHROPIC_AUTH_TOKEN set in user settings.json and not in managed", "suggest": {}, "rationale": "Shell env or --settings can override a user-settings token. Move it to managed-settings (deploy-time) for an non-overridable floor." }
+  ]
+}

@@ -1,0 +1,22 @@
+id: "fix_file_cache"
+target: "claude-code"
+name: "Preserve File Cache Across Compaction"
+description: "Keep the file dedup cache alive across compaction cycles to prevent re-read thrashing."
+file_id: "cli"
+
+status_tests:
+  # applied: readFileState.clear() is now wrapped in __isModEnabled__ guard
+  applied: '__isModEnabled__\(\s*["\x27]fix_file_cache["\x27]\s*\)'
+  # applicable: snapshot followed by unwrapped readFileState.clear() on next statement
+  applicable: '[\w$]+\(([\w$]+)\.readFileState\);\s*\r?\n\s*\1\.readFileState\.clear\(\)'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-fix-file-cache.cjs"
+
+
+mod:
+  live: true
+  category: "reliability"
+order: 4

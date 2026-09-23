@@ -1,0 +1,33 @@
+id: "set_context_limit"
+target: "claude-code"
+name: "Configurable Context & Batch Limits"
+description: "Override context window, tool batch, and memory chunk limits via the Mods panel (mods.json config)."
+file_id: "cli"
+status_tests:
+  # applied: the __getModConfig__ override is present
+  applied: '__getModConfig__\(\s*["\x27]set_context_limit["\x27]'
+  # Monolithic: 200000, 20000, 32000 cluster
+  # Code-split: 200000, 200000, 32000, 128000 cluster (two 200000s co-located)
+  applicable: 'var [\w$]+ = 200000;\s*\r?\n\s*var [\w$]+ = (20000|200000);'
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-set-context-limit.cjs"
+
+mod:
+  live: false
+  category: "reliability"
+  config:
+    - key: "context_limit"
+      type: "number"
+      default: 200000
+      label: "Context window"
+    - key: "tool_batch_limit"
+      type: "number"
+      default: 200000
+      label: "Tool batch limit"
+    - key: "memory_chunk_limit"
+      type: "number"
+      default: 200000
+      label: "Memory chunk limit"
+order: 18

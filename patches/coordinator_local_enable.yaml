@@ -1,0 +1,28 @@
+id: "coordinator_local_enable"
+target: "claude-code"
+name: "Coordinator Mode (Local)"
+description: "Activate CLAUDE_CODE_COORDINATOR_MODE in a local interactive terminal. The upstream rx() guard suppresses coordinator mode for any local TTY unless CLAUDE_CODE_REMOTE is set (a host identity flag that breaks auth under non-Anthropic routers). This wraps that guard so the env var alone activates coordinator mode locally. Headless claude -p already works without this patch."
+file_id: "cli"
+
+
+status_tests:
+  # Monolithic: ... ? false : fn() && !fn() && !fn(process.env.CLAUDE_CODE_REMOTE)
+  # Code-split: ... ? false : fn.CLAUDE_CODE_REMOTE===!0
+  # Accept either form of the env access pattern.
+  applied: '__isModEnabled__\(\s*["\x27]coordinator_local_enable["\x27]\s*\)\s*\?\s*false\s*:.{0,100}CLAUDE_CODE_REMOTE'
+  # Monolithic: the chunk has CLAUDE_CODE_COORDINATOR_MODE near the guard.
+  # Code-split: the guard is in a chunk with CLAUDE_CODE_REMOTE but without COORDINATOR_MODE.
+  # Use a disjunction: match either the monolithic anchor or the code-split guard context.
+  # The code-split guard context uses 'rc-disconnected' which is the fallback return value.
+  applicable: 'CLAUDE_CODE_COORDINATOR_MODE|rc-disconnected'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-coordinator-local-enable.cjs"
+
+mod:
+  section: "unlock"
+  live: true
+  category: "features"
+order: 9

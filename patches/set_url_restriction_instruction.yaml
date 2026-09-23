@@ -1,0 +1,29 @@
+id: "set_url_restriction_instruction"
+target: "claude-code"
+name: "Configurable URL Restriction Instruction"
+description: "Override the hardcoded URL restriction instruction via the Mods panel (tri-state: blank = stock, empty = clear, text = custom)."
+file_id: "cli"
+
+status_tests:
+  # applied: URL restriction text replaced with __getModConfig__ interpolation
+  applied: '__getModConfig__\(\s*["\x27]set_url_restriction_instruction["\x27]'
+  # applicable: the URL restriction text is present in its original form
+  # (inline in a template literal, not a var declaration)
+  applicable: 'IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-set-url-restriction-instruction.cjs"
+
+mod:
+  live: true
+  category: "features"
+  config:
+    - key: "instruction"
+      type: "string"
+      default: ""
+      label: "URL restriction (empty = clear)"
+
+
+order: 6

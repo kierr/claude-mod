@@ -1,0 +1,30 @@
+id: "add_compact_memory_capture"
+target: "claude-code"
+name: "Compact Memory Capture"
+description: "Capture durable insights to memory immediately before a conversation is compacted. Inserts a tool-enabled, cache-sharing runForkedAgent turn before the compaction summary turn so the live session saves user preferences, project decisions, and non-obvious context before its detail is summarized away. Reuses the summary turn's cacheSafeParams for a prompt-cache hit (no context re-pay); the forked turn is isolated so it adds nothing to the pre-compact context. Gated by __isModEnabled__; disabled equals stock behavior. Skips trivial compactions via min_tokens (default 20000)."
+file_id: "cli"
+
+
+status_tests:
+  applied: '__cmc_patched__'
+  applicable: 'Tool use is not allowed during compaction'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-add-compact-memory-capture.cjs"
+
+mod:
+  live: true
+  category: "features"
+  config:
+    - key: "min_tokens"
+      type: "number"
+      default: 20000
+      label: "Minimum pre-compact tokens to trigger capture"
+    - key: "max_turns"
+      type: "number"
+      default: 8
+      label: "Max turns for the memory-capture forked turn"
+
+order: 40

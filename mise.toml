@@ -1,0 +1,60 @@
+[tools]
+bun = "1.3.14"
+actionlint = "1.7.12"
+lefthook = "1.11"
+gitleaks = "8.30.1"
+
+# Source gates and the separate local macOS runtime check.
+
+[tasks."gate:test"]
+description = "Run unit tests (mirrors CI test job)"
+run = "bun install --frozen-lockfile && bun test"
+
+[tasks."gate:secrets"]
+description = "Secret scan with gitleaks (mirrors CI gitleaks job)"
+run = """
+if [ "${CI:-}" = "true" ]; then
+  gitleaks detect --source . --verbose --redact --no-git
+else
+  gitleaks detect --source . --verbose --redact --log-opts="origin/main..HEAD"
+fi
+"""
+
+[tasks."gate:fresh-install"]
+description = "Verify packed tool in disposable HOME (downloads upstream, no inference)"
+run = "node bin/gate-fresh-install.cjs"
+
+[tasks."gate:version-compat"]
+description = "Local macOS release check against last-tested-version"
+run = """
+test "$(uname -s)" = Darwin || { echo 'Runtime release check requires macOS' >&2; exit 1; }
+VERSION=$(cat last-tested-version)
+bun bin/patch.cjs patch "$VERSION" --force --verbose
+bun bin/patch.cjs run "$VERSION" -- --version
+"""
+
+[tasks."gate:workflows"]
+description = "Lint GitHub Actions workflows"
+run = "actionlint"
+
+[tasks."gate:codemods"]
+description = "Lint codemods for quality rules (no hardcoded names, marker safety)"
+run = "node bin/lint-codemods.cjs"
+
+[tasks."gate:fixtures"]
+description = "Fixture copyright audit (synthetic fixtures only)"
+run = "node bin/fixture-audit.cjs"
+
+[tasks.ci]
+description = "Run full CI suite locally (mirrors all CI jobs)"
+run = [
+  "mise run gate:secrets",
+  "mise run gate:workflows",
+  "mise run gate:codemods",
+  "mise run gate:fixtures",
+  "mise run gate:test",
+]
+
+[tasks."hooks:install"]
+description = "Install lefthook Git hooks (requires lefthook in mise tools)"
+run = "lefthook install"

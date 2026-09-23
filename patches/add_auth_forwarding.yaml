@@ -1,0 +1,21 @@
+id: "add_auth_forwarding"
+target: "claude-code"
+name: "Forward Credentials to Background Processes"
+description: "Propagate ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, and ANTHROPIC_BASE_URL to daemon workers and agent sessions."
+file_id: "cli"
+order: 14
+
+status_tests:
+  applied: '__isModEnabled__\("add_auth_forwarding"\)'
+  # Accept inline arrays and Set-backed environment allowlists.
+  applicable: 'CLAUDE_CONFIG_DIR'
+
+codemod:
+  type: "node_script"
+  engine: "regex"
+  script: "codemods/codemod-add-auth-forwarding.cjs"
+
+mod:
+  live: true
+  category: "remote"
+  config: []
