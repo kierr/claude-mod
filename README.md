@@ -1,32 +1,24 @@
 # claude-mod
 
-Since mid-2025, I have used this project to heavily modify, patch, and extend Claude Code in a number of ways. In late 2026 I moved on to a heavily customized `pi`, but I wanted to still open source this project for others who might have use in it.
+Since mid-2025, I have used this project to heavily modify, patch, and extend Claude Code in a number of ways. In late 2026 I have for the most part moved on, to a heavily customized `pi`, but I wanted to still open source this project for others who might have use in it.
 
-claude-mod downloads an official Claude Code package, transforms it on your machine, and runs the result with Bun. The repository distributes the patching tool—not Claude Code or a prepatched binary. The goal is to smooth out the friction around typical patching, and provide a full TUI UX for enabling, disabling, and toggling mods. I call it "un-nerfing" — Anthropic has historically restricted lots of things to specific models (like opus only) or disabled them when using a 3PP. In other cases, features are gated, entirely hard-coded off, or added and then removed silently.
+claude-mod downloads an official Claude Code package, transforms it on your machine, and runs the result with Bun. The repository distributes the patching tool—not Claude Code or a prepatched binary. The project's goal is to smooth out the friction around typical patching, and provide a full TUI UX for enabling, disabling, and toggling them. I call it "un-nerfing" — Anthropic has historically restricted lots of things to specific models (like opus only) or disabled them when using a 3PP. In other cases, features are gated, entirely hard-coded off, or added and then removed silently.
 
 These mods are focused on re-enabling these things, for 3PP and non-Anthropic models. There are also tweaks and toggles exposed to configure things that are otherwise unconfigurable.
 
-It is very easy to extend and expand with new mods. This is done using YAML, extending new patches, and exposing the new mod via a Mods TUI panel alongside other TUI configuration.
+It is very easy, using Claude Code, to extend and expand with new mods. This is done using YAML, extending new patches, and exposing the new mod via a Mods TUI panel alongside other TUI configuration.
 
-claude-mod patches your local installation — it does not distribute pre-built binaries or Anthropic's code. The neat thing is, once patched, you don't need to keep repatching to enable, disable, or configure the mods — you use the TUI Mods panel.
+claude-mod patches your local installation — it does not distribute pre-built binaries or Anthropic's code. The neat thing is, once patched, you don't need to keep repatching to enable, disable, or configure the mods - you use the TUI Mods panel.
 
 <img src="docs/mods-panel.png" alt="The Mods tab in /settings, listing every mod grouped by category (Model, Features, Reliability, Remote, Display) with enable toggles and per-mod config/restart indicators. 39 of 40 mods enabled." width="420" />
 
-<figure>
-<figcaption><strong>The Mods panel</strong> — every mod grouped by category, with live toggles. Some entries expose a <code>config</code> submenu (see below) or a <code>restart</code> indicator for changes that need a restart.</figcaption>
-</figure>
-
 <img src="docs/mod-config.png" alt="The Settings tab in /config showing a single mod's detail: Auto-Dream Mode (set_auto_dream), a live toggle set to disabled, and two configurable numeric values (Min hours/sessions before auto-dream) with keyboard hints." width="640" />
 
-<figure>
-<figcaption><strong>A mod's config submenu</strong> — a live toggle plus editable values, reached by pressing <code>Enter</code> on a mod that exposes a <code>config</code> action.</figcaption>
-</figure>
-
-Skills for creating new mods and maintaining version compatibility are included in `.claude/skills/`.
+I have included a skill for creating new Mods. There is also a skill for maintaining version compatibility, as each new version requires some effort.
 
 **Supported release: Claude Code 2.1.181 on macOS.**
 
-I had it working on Linux too, with Claude Code Actions, and I'll work on getting that back up next, along with the latest version. Compatibility was maintained back to ~1.3 in private history, but I've squashed everything before making this public.
+I had it working on Linux too, with Claude Code Actions, I'll work on getting that up next, along with the latest version. I had in git history, compatibility back to ~1.3, but I've squashed everything before making this public.
 
 Starting with 2.1.242, Claude Code ships as code-split ESM chunks instead of a single bundled file. claude-mod handles this automatically. On 2.1.181, 43 patches apply and one is version-gated (`model_picker_search`). On 2.1.277, the same 43 patches apply with 6 code-split skips — `mods_runtime`, `remove_attribution`, `add_cache_keepalive`, `unlock_permanent_cron`, `unlock_models`, and `model_picker_search`. The skips are tracked in `CODESPLIT_SKIP_PATCHES` inside `bin/patch.cjs`. The supported release stays at 2.1.181 until a fresh-install gate passes for a code-split version.
 
